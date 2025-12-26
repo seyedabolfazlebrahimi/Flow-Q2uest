@@ -3,7 +3,7 @@ import os
 import json
 import urllib.request
 from functools import lru_cache
-from typing import Optional, List, Union, Dict, Tuple
+from typing import Optional, List, Union, Dict, Tuple, Iterable
 
 import pandas as pd
 from fastapi import FastAPI, Query
@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 # Config
 # ------------------------------
 CSV_FILE = os.getenv("CSV_FILE", "NWQP-DO.csv")  # local path OR URL
-HUC8_INDEX_URL = (os.getenv("HUC8_INDEX_URL") or "").strip()  # ✅ NEW (optional)
+HUC8_INDEX_URL = (os.getenv("HUC8_INDEX_URL") or "").strip()  # optional: precomputed HUC8 list
 
 CANDIDATE_PARAM_COLS = [
     "CuratedConstituent",
@@ -35,6 +35,8 @@ LAT_COL = "lat"
 LON_COL = "lon"
 
 INDEX_LOCAL_HUC8 = "/tmp/huc8_list.json"
+
+DEFAULT_CHUNKSIZE = 200_000
 
 
 # ------------------------------
@@ -85,12 +87,25 @@ def _normalize_to_list(x: Optional[Union[str, List[str]]]) -> List[str]:
     return [s] if s else []
 
 
-def _read_chunks(chunksize: int = 200_000, usecols: Optional[List[str]] = None):
+def _read_chunks(
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    usecols: Optional[List[str]] = None,
+) -> Iterable[pd.DataFrame]:
     path = _local_csv_path()
-    return pd.read_csv(path, low_memory=False, chunksize=chunksize, usecols=usecols)
+    return pd.read_csv(
+        path,
+        low_memory=False,
+        chunksize=chunksize,
+        usecols=usecols,
+    )
 
 
 def _apply_filters(chunk: pd.DataFrame, parameter, huc8) -> pd.DataFrame:
+    """
+    Applies filters if the relevant columns exist in chunk.
+    parameter: Optional[List[str]] or str
+    huc8: Optional[List[str]] or str
+    """
     param_col = get_param_col()
 
     if huc8 and HUC8_COL in chunk.columns:
@@ -152,7 +167,7 @@ def home():
 
 @app.get("/huc8-list")
 def huc8_list():
-    # ✅ FAST PATH: precomputed index
+    # FAST PATH: precomputed index
     idx = _load_huc8_index()
     if isinstance(idx, dict) and "huc8_values" in idx:
         return {
@@ -161,7 +176,6 @@ def huc8_list():
             "source": "index",
         }
 
-    # fallback: scan CSV (slow)
     cols = get_columns()
     if HUC8_COL not in cols:
         return {"huc8_column": None, "huc8_values": [], "source": "csv_scan"}
@@ -221,9 +235,11 @@ def mean_per_station(
         vals = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
         chunk = chunk.assign(_val=vals).dropna(subset=[STATION_COL, "_val"])
 
-        for sid, grp in chunk.groupby(STATION_COL)["_val"]:
-            s = float(grp.sum())
-            c = int(grp.count())
+        # groupby on filtered chunk only
+        gb = chunk.groupby(STATION_COL)["_val"].agg(["sum", "count"])
+        for sid, row in gb.iterrows():
+            s = float(row["sum"])
+            c = int(row["count"])
             ps, pc = sums_counts.get(sid, (0.0, 0))
             sums_counts[sid] = (ps + s, pc + c)
 
@@ -245,29 +261,47 @@ def station_data(
     if STATION_COL not in cols:
         return {"error": f"Missing required column: {STATION_COL}"}
 
+    param_col = get_param_col()
+
+    # read only what we need (critical for RAM)
+    usecols = [STATION_COL]
+    for c in [DATE_COL, VALUE_COL, LAT_COL, LON_COL]:
+        if c in cols:
+            usecols.append(c)
+    if HUC8_COL in cols:
+        usecols.append(HUC8_COL)
+    if param_col and param_col in cols:
+        usecols.append(param_col)
+
     results = []
     count = 0
 
-    for chunk in _read_chunks():
+    for chunk in _read_chunks(usecols=list(dict.fromkeys(usecols))):
+        # station filter first
         if STATION_COL not in chunk.columns:
             continue
-
-        sub = chunk[chunk[STATION_COL] == station_id]
+        sub = chunk[chunk[STATION_COL].astype(str) == str(station_id)]
         if sub.empty:
             continue
 
+        # then parameter/huc8 filters
         sub = _apply_filters(sub, parameter=parameter, huc8=huc8)
+        if sub.empty:
+            continue
 
         if DATE_COL in sub.columns:
             sub[DATE_COL] = pd.to_datetime(sub[DATE_COL], errors="coerce")
         if VALUE_COL in sub.columns:
             sub[VALUE_COL] = pd.to_numeric(sub[VALUE_COL], errors="coerce")
 
-        for r in sub.fillna("").astype(str).to_dict(orient="records"):
+        # convert small subset only
+        recs = sub.replace({pd.NA: None}).to_dict(orient="records")
+        for r in recs:
             results.append(r)
             count += 1
             if count >= limit:
                 break
+
         if count >= limit:
             break
 
@@ -276,7 +310,7 @@ def station_data(
         "returned": len(results),
         "limit": limit,
         "data": results,
-        "parameter_column": get_param_col(),
+        "parameter_column": param_col,
     }
 
 
@@ -291,6 +325,10 @@ def download_range(
     if DATE_COL not in cols:
         return {"error": f"Missing required column: {DATE_COL}"}
 
+    param_col = get_param_col()
+
+    # keep output slimmer if you want; for now keep all columns (but this can be heavy)
+    # safer: only write needed columns; but I'll keep behavior close to your original.
     out_path = "/tmp/subset.csv"
     first = True
 
@@ -319,6 +357,7 @@ def download_range(
 def stations(
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
+    max_points: int = 20000,   # IMPORTANT: cap to avoid huge RAM usage
 ):
     cols = get_columns()
     for c in [STATION_COL, LAT_COL, LON_COL]:
@@ -326,24 +365,40 @@ def stations(
             return {"error": f"Missing required column: {c}"}
 
     param_col = get_param_col()
-    needed = {STATION_COL, LAT_COL, LON_COL}
+
+    # read only needed columns
+    needed = [STATION_COL, LAT_COL, LON_COL]
     if HUC8_COL in cols:
-        needed.add(HUC8_COL)
+        needed.append(HUC8_COL)
     if param_col and param_col in cols:
-        needed.add(param_col)
+        needed.append(param_col)
 
     seen: Dict[str, Tuple[float, float]] = {}
 
-    for chunk in _read_chunks(usecols=list(needed)):
+    for chunk in _read_chunks(usecols=needed):
         chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8)
+        if chunk.empty:
+            continue
 
+        # numeric lat/lon
         chunk[LAT_COL] = pd.to_numeric(chunk[LAT_COL], errors="coerce")
         chunk[LON_COL] = pd.to_numeric(chunk[LON_COL], errors="coerce")
         chunk = chunk.dropna(subset=[STATION_COL, LAT_COL, LON_COL])
+        if chunk.empty:
+            continue
 
-        for _, r in chunk[[STATION_COL, LAT_COL, LON_COL]].drop_duplicates().iterrows():
-            sid = str(r[STATION_COL])
-            if sid not in seen:
-                seen[sid] = (float(r[LAT_COL]), float(r[LON_COL]))
+        # iterate efficiently without iterrows
+        # only station/lat/lon needed now
+        sub = chunk[[STATION_COL, LAT_COL, LON_COL]]
+
+        for sid, la, lo in zip(sub[STATION_COL].astype(str), sub[LAT_COL], sub[LON_COL]):
+            if sid in seen:
+                continue
+            seen[sid] = (float(la), float(lo))
+            if len(seen) >= max_points:
+                break
+
+        if len(seen) >= max_points:
+            break
 
     return [{"MonitoringLocationIdentifierCor": sid, "lat": lat, "lon": lon} for sid, (lat, lon) in seen.items()]
