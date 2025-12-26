@@ -1,0 +1,17 @@
+{
+  "parameter_column": "CuratedConstituent",
+  "all_parameters": [
+    "Calcium (Dissolved)",
+    "Dissolved oxygen (Total)",
+    "Organic Carbon (Total)"
+  ],
+  "by_huc8": {
+    "3090101": [
+      "Calcium (Dissolved)",
+      "Dissolved oxygen (Total)"
+    ],
+    "3100101": [
+      "Organic Carbon (Total)"
+    ]
+  }
+}
