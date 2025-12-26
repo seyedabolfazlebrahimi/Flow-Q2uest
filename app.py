@@ -121,6 +121,12 @@ def _apply_filters(
 app = FastAPI(title="Water Quality API")
 
 
+# ✅ Render health checks sometimes use HEAD /
+@app.head("/")
+def home_head():
+    return
+
+
 @app.get("/")
 def home():
     cols = get_columns()
@@ -247,9 +253,6 @@ def station_data(
 
     param_col = get_param_col()
 
-    needed = set(cols)  # return full rows (can be heavy)
-    # But to reduce memory, we still stream and stop at limit.
-
     results = []
     count = 0
 
@@ -269,7 +272,6 @@ def station_data(
         if VALUE_COL in sub.columns:
             sub[VALUE_COL] = pd.to_numeric(sub[VALUE_COL], errors="coerce")
 
-        # convert to safe JSON-ish
         rows = sub.fillna("").astype(str).to_dict(orient="records")
         for r in rows:
             results.append(r)
@@ -301,9 +303,8 @@ def download_range(
     huc8: Optional[List[str]] = Query(default=None),
 ):
     cols = get_columns()
-    param_col = get_param_col()
+    _ = get_param_col()
 
-    needed = set(cols)
     if DATE_COL not in cols:
         return {"error": f"Missing required date column: {DATE_COL}"}
 
@@ -328,7 +329,6 @@ def download_range(
         first_write = False
 
     if first_write:
-        # nothing written
         pd.DataFrame(columns=cols).to_csv(out_path, index=False)
 
     return FileResponse(out_path, filename="subset.csv")
