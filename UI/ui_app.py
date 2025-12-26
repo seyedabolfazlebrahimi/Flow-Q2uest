@@ -1,5 +1,7 @@
 # filename: ui_app.py
-import os  # ✅ FIX: needed for os.getenv
+import os
+import json
+import time
 
 import pandas as pd
 import requests
@@ -8,8 +10,8 @@ import folium
 from streamlit_folium import st_folium
 import altair as alt
 
-# ✅ Use env var if set (Render), otherwise fallback to local
-API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
+# Use env var if set (Render), otherwise fallback to local
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000").strip()
 
 st.set_page_config(page_title="Water Quality UI", layout="wide")
 st.title("Water Quality UI (Demo)")
@@ -20,9 +22,29 @@ st.markdown(
 )
 
 # ----------------------------
+# Network helpers (Retry)
+# ----------------------------
+def get_json_with_retry(url, params=None, tries=6, timeout=180):
+    """
+    Render Free can intermittently return 502 (cold start / restart / proxy).
+    This wrapper retries with backoff.
+    """
+    last_exc = None
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_exc = e
+            time.sleep(1.5 * (i + 1))
+    raise last_exc
+
+
+# ----------------------------
 # Helpers
 # ----------------------------
-def build_query_params(station_id=None, parameters=None, huc8s=None, start_year=None, end_year=None):
+def build_query_params(station_id=None, parameters=None, huc8s=None, start_year=None, end_year=None, max_points=None):
     """
     Build request params allowing repeated keys:
     params = [("parameter", p1), ("parameter", p2), ("huc8", h1), ...]
@@ -46,36 +68,74 @@ def build_query_params(station_id=None, parameters=None, huc8s=None, start_year=
     if end_year is not None:
         params.append(("end_year", int(end_year)))
 
+    # cap stations returned by API (prevents heavy payload + makes UI stable)
+    if max_points is not None:
+        params.append(("max_points", int(max_points)))
+
     return params
+
+
+def _unpack_station_payload(payload):
+    """
+    API /station-data might return:
+      A) list[dict]   (old)
+      B) dict with {"data": list[dict], ...}  (new)
+    This function returns list[dict] safely.
+    """
+    if payload is None:
+        return []
+
+    if isinstance(payload, list):
+        return payload
+
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], list):
+            return payload["data"]
+        return []
+
+    if isinstance(payload, str):
+        try:
+            obj = json.loads(payload)
+            return _unpack_station_payload(obj)
+        except Exception:
+            return []
+
+    return []
 
 
 @st.cache_data(ttl=3600)
 def load_huc8_list(api_base: str):
-    r = requests.get(f"{api_base}/huc8-list", timeout=60)
-    r.raise_for_status()
-    payload = r.json()
+    payload = get_json_with_retry(f"{api_base}/huc8-list", params=None, tries=6, timeout=180)
     return payload.get("huc8_column"), payload.get("huc8_values", [])
 
 
 @st.cache_data(ttl=3600)
 def load_parameters(api_base: str, huc8s: tuple[str, ...]):
     params = build_query_params(huc8s=list(huc8s))
-    r = requests.get(f"{api_base}/parameters", params=params, timeout=60)
-    r.raise_for_status()
-    payload = r.json()
+    payload = get_json_with_retry(f"{api_base}/parameters", params=params, tries=6, timeout=240)
     return payload.get("parameter_column"), payload.get("parameters", [])
 
 
 @st.cache_data(ttl=3600)
-def load_stations_df(api_base: str, parameters: tuple[str, ...], huc8s: tuple[str, ...]) -> pd.DataFrame:
-    params = build_query_params(parameters=list(parameters), huc8s=list(huc8s))
-    r = requests.get(f"{api_base}/stations", params=params, timeout=60)
-    r.raise_for_status()
-    df = pd.DataFrame(r.json())
+def load_stations_df(
+    api_base: str,
+    parameters: tuple[str, ...],
+    huc8s: tuple[str, ...],
+    max_points: int = 20000,
+) -> pd.DataFrame:
+    params = build_query_params(parameters=list(parameters), huc8s=list(huc8s), max_points=max_points)
+    payload = get_json_with_retry(f"{api_base}/stations", params=params, tries=6, timeout=240)
+
+    df = pd.DataFrame(payload)
     if df.empty:
         return df
-    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+
+    # If API returns {"error": "..."} as dict -> DataFrame will have weird columns; handle quickly
+    if "error" in df.columns:
+        return pd.DataFrame()
+
+    df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
+    df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
     df["MonitoringLocationIdentifierCor"] = df["MonitoringLocationIdentifierCor"].astype(str).str.strip()
     return df.dropna(subset=["lat", "lon"])
 
@@ -84,40 +144,61 @@ def load_stations_df(api_base: str, parameters: tuple[str, ...], huc8s: tuple[st
 def load_station_data(api_base: str, station_id: str, parameters: tuple[str, ...], huc8s: tuple[str, ...]) -> pd.DataFrame:
     station_id = str(station_id).strip()
     params = build_query_params(station_id=station_id, parameters=list(parameters), huc8s=list(huc8s))
-    r = requests.get(f"{api_base}/station-data", params=params, timeout=120)
-    r.raise_for_status()
-    return pd.DataFrame(r.json())
+    payload = get_json_with_retry(f"{api_base}/station-data", params=params, tries=6, timeout=360)
+
+    rows = _unpack_station_payload(payload)
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=900)
 def load_mean_per_station(api_base: str, parameter: str, huc8s: tuple[str, ...]) -> pd.DataFrame:
     params = build_query_params(parameters=[parameter], huc8s=list(huc8s))
-    r = requests.get(f"{api_base}/mean-per-station", params=params, timeout=120)
-    r.raise_for_status()
-    return pd.DataFrame(r.json())
+    payload = get_json_with_retry(f"{api_base}/mean-per-station", params=params, tries=6, timeout=360)
+    return pd.DataFrame(payload)
 
 
 def parse_timeseries(df_raw: pd.DataFrame) -> pd.DataFrame:
-    if df_raw.empty:
-        return df_raw
+    """
+    Robust timeseries parser (never KeyError):
+    - Detects date + value columns safely
+    - Returns standardized columns: Date, CuratedResultMeasureValue
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame(columns=["Date", "CuratedResultMeasureValue"])
 
     df = df_raw.copy()
 
-    # ✅ FIX: use ActivityStartDate as the date column (API uses this)
-    if "ActivityStartDate" in df.columns:
-        df["Date"] = pd.to_datetime(df["ActivityStartDate"], errors="coerce")
-    elif "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    # Detect date column
+    date_candidates = [
+        "ActivityStartDate",
+        "ActivityStartDateTime",
+        "Date",
+        "SampleDate",
+        "sample_date",
+    ]
+    date_col = next((c for c in date_candidates if c in df.columns), None)
 
-    if "CuratedResultMeasureValue" in df.columns:
-        df["CuratedResultMeasureValue"] = pd.to_numeric(df["CuratedResultMeasureValue"], errors="coerce")
+    # Detect value column
+    value_candidates = [
+        "CuratedResultMeasureValue",
+        "ResultMeasureValue",
+        "Value",
+        "result_value",
+    ]
+    value_col = next((c for c in value_candidates if c in df.columns), None)
+
+    if date_col is None or value_col is None:
+        return pd.DataFrame(columns=["Date", "CuratedResultMeasureValue"])
+
+    df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df["CuratedResultMeasureValue"] = pd.to_numeric(df[value_col], errors="coerce")
 
     df = df.dropna(subset=["Date", "CuratedResultMeasureValue"]).sort_values("Date")
     return df[["Date", "CuratedResultMeasureValue"]]
 
 
 def compute_mean_from_timeseries(df_ts: pd.DataFrame):
-    if df_ts.empty or "CuratedResultMeasureValue" not in df_ts.columns:
+    if df_ts is None or df_ts.empty or "CuratedResultMeasureValue" not in df_ts.columns:
         return None
     vals = pd.to_numeric(df_ts["CuratedResultMeasureValue"], errors="coerce").dropna()
     if vals.empty:
@@ -126,6 +207,10 @@ def compute_mean_from_timeseries(df_ts: pd.DataFrame):
 
 
 def render_timeseries_chart(df_ts: pd.DataFrame, height: int = 350) -> None:
+    if df_ts is None or df_ts.empty:
+        st.info("No timeseries data to plot.")
+        return
+
     chart_df = df_ts.rename(columns={"CuratedResultMeasureValue": "Concentration"}).copy()
 
     base = alt.Chart(chart_df).encode(
@@ -243,7 +328,6 @@ if not selected_params:
     st.stop()
 
 selected_params_t = tuple(selected_params)
-
 plot_param = st.selectbox("Plot parameter (for charts)", options=list(selected_params), index=0)
 
 st.divider()
@@ -255,7 +339,7 @@ st.header("2) Stations (Table)")
 
 with st.expander("Show stations list (map-ready)"):
     if st.button("Load stations"):
-        df_st = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t)
+        df_st = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
         if df_st.empty:
             st.warning("No stations returned (check HUC8/parameter selection).")
         else:
@@ -273,7 +357,8 @@ with st.expander("Show stations list (map-ready)"):
 st.header("3) Station Picker")
 
 with st.spinner("Loading stations for picker..."):
-    df_picker = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t)
+    # cap keeps UI stable and avoids huge payloads
+    df_picker = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
 
 if df_picker.empty:
     st.warning("No stations returned for current filters. Try clearing HUC8 filter or changing parameters.")
@@ -357,18 +442,30 @@ if c3.button("Download range CSV from API"):
         start_year=int(start_year),
         end_year=int(end_year),
     )
-    r = requests.get(f"{API_BASE}/download-range", params=params_dl, timeout=180)
-    r.raise_for_status()
+    # use retry wrapper
+    content = None
+    last_exc = None
+    for i in range(6):
+        try:
+            r = requests.get(f"{API_BASE}/download-range", params=params_dl, timeout=360)
+            r.raise_for_status()
+            content = r.content
+            break
+        except Exception as e:
+            last_exc = e
+            time.sleep(1.5 * (i + 1))
+    if content is None:
+        raise last_exc
 
     st.download_button(
         "Click to download subset.csv",
-        r.content,
+        content,
         file_name="subset.csv",
         mime="text/csv",
     )
 
 # ----------------------------
-# 6) Map + time series plot (+ mean) + station count (NO LIMIT)
+# 6) Map + time series plot (+ mean)
 # ----------------------------
 st.header("6) Station Map + Time Series")
 
@@ -390,14 +487,15 @@ if st.session_state["show_map"]:
 
     with map_col:
         with st.spinner("Loading stations and building map..."):
-            df_map = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t)
+            # IMPORTANT: cap stations to keep UI responsive
+            df_map = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=5000)
 
             if df_map.empty:
                 st.warning("No stations available (check HUC8/parameter selection).")
             else:
                 total_stations = len(df_map)
-                st.markdown(f"**Stations available (after filters):** {total_stations}")
-                st.caption("Showing ALL stations on the map (no cap).")
+                st.markdown(f"**Stations shown on map (capped):** {total_stations}")
+                st.caption("Map is capped to avoid heavy rendering. Use Station Picker for exact station selection.")
 
                 center_lat = float(df_map["lat"].mean())
                 center_lon = float(df_map["lon"].mean())
@@ -465,7 +563,7 @@ if st.session_state["show_map"]:
                     st.dataframe(df_raw, use_container_width=True)
 
 # ----------------------------
-# 7) Mean Concentration Map (per parameter) with blue->red color scale
+# 7) Mean Concentration Map
 # ----------------------------
 st.header("7) Mean Concentration Map (Blue = Low, Red = High)")
 
@@ -486,7 +584,8 @@ with cbtn2:
         st.session_state["show_mean_maps"] = False
 
 if st.session_state["show_mean_maps"]:
-    df_coords = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t)
+    # cap coords to avoid giant join + giant rendering
+    df_coords = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
     if df_coords.empty:
         st.warning("No station coordinates available for the current filters.")
         st.stop()
@@ -513,10 +612,13 @@ if st.session_state["show_mean_maps"]:
             st.warning(f"No stations with both coordinates and mean values for: {p}")
             continue
 
+        # cap rendering to keep UI stable
+        df_join = df_join.head(5000)
+
         vmin = float(df_join["mean_value"].min())
         vmax = float(df_join["mean_value"].max())
 
-        st.markdown(f"**Stations on map:** {len(df_join)}")
+        st.markdown(f"**Stations on map (capped):** {len(df_join)}")
         st.caption(f"Mean range: {vmin:.4g} → {vmax:.4g}")
 
         center_lat = float(df_join["lat"].mean())
