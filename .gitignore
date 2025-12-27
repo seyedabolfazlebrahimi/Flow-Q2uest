@@ -1,2 +1,4 @@
+NWQP-DO.csv
+*.csv
 __pycache__/
-
+*.pyc
