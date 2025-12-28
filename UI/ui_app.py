@@ -13,8 +13,8 @@ import altair as alt
 # Use env var if set (Render), otherwise fallback to local
 API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000").strip()
 
-st.set_page_config(page_title="Water Quality UI", layout="wide")
-st.title("Water Quality UI (Demo)")
+st.set_page_config(page_title="FLOW Q2UEST (Demo)", layout="wide")
+st.title("FLOW Q2UEST (Demo)")
 st.markdown(
     "Interactive UI connected to the Water Quality API. "
     "Choose one or more HUC8 basins (optional), then choose one or more parameters, "
