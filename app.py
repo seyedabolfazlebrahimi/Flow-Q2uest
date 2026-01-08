@@ -235,7 +235,6 @@ def mean_per_station(
         vals = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
         chunk = chunk.assign(_val=vals).dropna(subset=[STATION_COL, "_val"])
 
-        # groupby on filtered chunk only
         gb = chunk.groupby(STATION_COL)["_val"].agg(["sum", "count"])
         for sid, row in gb.iterrows():
             s = float(row["sum"])
@@ -277,14 +276,13 @@ def station_data(
     count = 0
 
     for chunk in _read_chunks(usecols=list(dict.fromkeys(usecols))):
-        # station filter first
         if STATION_COL not in chunk.columns:
             continue
+
         sub = chunk[chunk[STATION_COL].astype(str) == str(station_id)]
         if sub.empty:
             continue
 
-        # then parameter/huc8 filters
         sub = _apply_filters(sub, parameter=parameter, huc8=huc8)
         if sub.empty:
             continue
@@ -294,7 +292,6 @@ def station_data(
         if VALUE_COL in sub.columns:
             sub[VALUE_COL] = pd.to_numeric(sub[VALUE_COL], errors="coerce")
 
-        # convert small subset only
         recs = sub.replace({pd.NA: None}).to_dict(orient="records")
         for r in recs:
             results.append(r)
@@ -325,10 +322,6 @@ def download_range(
     if DATE_COL not in cols:
         return {"error": f"Missing required column: {DATE_COL}"}
 
-    param_col = get_param_col()
-
-    # keep output slimmer if you want; for now keep all columns (but this can be heavy)
-    # safer: only write needed columns; but I'll keep behavior close to your original.
     out_path = "/tmp/subset.csv"
     first = True
 
@@ -357,12 +350,18 @@ def download_range(
 def stations(
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
-    max_points: int = 20000,   # IMPORTANT: cap to avoid huge RAM usage
+    min_samples: int = 1,      # ✅ NEW: minimum number of rows per station (after filters)
+    max_points: int = 20000,   # cap to avoid huge RAM usage
 ):
     cols = get_columns()
     for c in [STATION_COL, LAT_COL, LON_COL]:
         if c not in cols:
             return {"error": f"Missing required column: {c}"}
+
+    if min_samples is None:
+        min_samples = 1
+    min_samples = max(1, int(min_samples))
+    max_points = max(1, int(max_points))
 
     param_col = get_param_col()
 
@@ -373,32 +372,66 @@ def stations(
     if param_col and param_col in cols:
         needed.append(param_col)
 
-    seen: Dict[str, Tuple[float, float]] = {}
+    # station -> (lat, lon, n_samples)
+    agg: Dict[str, Tuple[float, float, int]] = {}
 
     for chunk in _read_chunks(usecols=needed):
         chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8)
         if chunk.empty:
             continue
 
-        # numeric lat/lon
+        # clean coords
         chunk[LAT_COL] = pd.to_numeric(chunk[LAT_COL], errors="coerce")
         chunk[LON_COL] = pd.to_numeric(chunk[LON_COL], errors="coerce")
         chunk = chunk.dropna(subset=[STATION_COL, LAT_COL, LON_COL])
         if chunk.empty:
             continue
 
-        # iterate efficiently without iterrows
-        # only station/lat/lon needed now
-        sub = chunk[[STATION_COL, LAT_COL, LON_COL]]
+        # station ids as strings
+        sids = chunk[STATION_COL].astype(str).str.strip()
 
-        for sid, la, lo in zip(sub[STATION_COL].astype(str), sub[LAT_COL], sub[LON_COL]):
-            if sid in seen:
+        # counts in this chunk
+        counts = sids.value_counts()
+
+        # first lat/lon per station in this chunk
+        first_xy = (
+            chunk.assign(_sid=sids)[["_sid", LAT_COL, LON_COL]]
+            .drop_duplicates(subset=["_sid"])
+            .set_index("_sid")
+        )
+
+        for sid, c in counts.items():
+            if sid not in first_xy.index:
                 continue
-            seen[sid] = (float(la), float(lo))
-            if len(seen) >= max_points:
-                break
+            lat = float(first_xy.loc[sid, LAT_COL])
+            lon = float(first_xy.loc[sid, LON_COL])
 
-        if len(seen) >= max_points:
+            if sid in agg:
+                plat, plon, pc = agg[sid]
+                agg[sid] = (plat, plon, pc + int(c))
+            else:
+                agg[sid] = (lat, lon, int(c))
+
+        # optional early stop for memory/time:
+        # if we already have a lot of unique stations AND no min_samples filter,
+        # keep behavior close to old cap.
+        if len(agg) >= max_points and min_samples <= 1:
             break
 
-    return [{"MonitoringLocationIdentifierCor": sid, "lat": lat, "lon": lon} for sid, (lat, lon) in seen.items()]
+    out = []
+    for sid, (lat, lon, n) in agg.items():
+        if n >= min_samples:
+            out.append(
+                {
+                    "MonitoringLocationIdentifierCor": sid,
+                    "lat": lat,
+                    "lon": lon,
+                    "n_samples": n,  # ✅ NEW in response
+                }
+            )
+
+    # If user asks for many points, still cap output size
+    if len(out) > max_points:
+        out = out[:max_points]
+
+    return out
