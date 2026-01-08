@@ -44,7 +44,15 @@ def get_json_with_retry(url, params=None, tries=6, timeout=180):
 # ----------------------------
 # Helpers
 # ----------------------------
-def build_query_params(station_id=None, parameters=None, huc8s=None, start_year=None, end_year=None, max_points=None):
+def build_query_params(
+    station_id=None,
+    parameters=None,
+    huc8s=None,
+    start_year=None,
+    end_year=None,
+    max_points=None,
+    min_samples=None,  # ✅ NEW
+):
     """
     Build request params allowing repeated keys:
     params = [("parameter", p1), ("parameter", p2), ("huc8", h1), ...]
@@ -71,6 +79,10 @@ def build_query_params(station_id=None, parameters=None, huc8s=None, start_year=
     # cap stations returned by API (prevents heavy payload + makes UI stable)
     if max_points is not None:
         params.append(("max_points", int(max_points)))
+
+    # ✅ minimum samples per station (server-side filter)
+    if min_samples is not None:
+        params.append(("min_samples", int(min_samples)))
 
     return params
 
@@ -122,8 +134,14 @@ def load_stations_df(
     parameters: tuple[str, ...],
     huc8s: tuple[str, ...],
     max_points: int = 20000,
+    min_samples: int = 1,  # ✅ NEW
 ) -> pd.DataFrame:
-    params = build_query_params(parameters=list(parameters), huc8s=list(huc8s), max_points=max_points)
+    params = build_query_params(
+        parameters=list(parameters),
+        huc8s=list(huc8s),
+        max_points=max_points,
+        min_samples=min_samples,
+    )
     payload = get_json_with_retry(f"{api_base}/stations", params=params, tries=6, timeout=240)
 
     df = pd.DataFrame(payload)
@@ -137,6 +155,11 @@ def load_stations_df(
     df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
     df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
     df["MonitoringLocationIdentifierCor"] = df["MonitoringLocationIdentifierCor"].astype(str).str.strip()
+
+    # n_samples optional (new API); keep if exists
+    if "n_samples" in df.columns:
+        df["n_samples"] = pd.to_numeric(df.get("n_samples"), errors="coerce")
+
     return df.dropna(subset=["lat", "lon"])
 
 
@@ -168,7 +191,6 @@ def parse_timeseries(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     df = df_raw.copy()
 
-    # Detect date column
     date_candidates = [
         "ActivityStartDate",
         "ActivityStartDateTime",
@@ -178,7 +200,6 @@ def parse_timeseries(df_raw: pd.DataFrame) -> pd.DataFrame:
     ]
     date_col = next((c for c in date_candidates if c in df.columns), None)
 
-    # Detect value column
     value_candidates = [
         "CuratedResultMeasureValue",
         "ResultMeasureValue",
@@ -330,6 +351,10 @@ if not selected_params:
 selected_params_t = tuple(selected_params)
 plot_param = st.selectbox("Plot parameter (for charts)", options=list(selected_params), index=0)
 
+# ✅ NEW: minimum samples per station
+st.caption("Station filter")
+min_samples_ui = st.number_input("Minimum samples per station", min_value=1, value=1, step=1)
+
 st.divider()
 
 # ----------------------------
@@ -339,10 +364,18 @@ st.header("2) Stations (Table)")
 
 with st.expander("Show stations list (map-ready)"):
     if st.button("Load stations"):
-        df_st = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
+        df_st = load_stations_df(
+            API_BASE,
+            selected_params_t,
+            selected_huc8s_t,
+            max_points=20000,
+            min_samples=min_samples_ui,
+        )
         if df_st.empty:
             st.warning("No stations returned (check HUC8/parameter selection).")
         else:
+            if "n_samples" in df_st.columns:
+                st.caption("`n_samples` = number of rows for that station AFTER current filters.")
             st.dataframe(df_st, use_container_width=True)
             st.download_button(
                 "Download stations as CSV",
@@ -357,19 +390,34 @@ with st.expander("Show stations list (map-ready)"):
 st.header("3) Station Picker")
 
 with st.spinner("Loading stations for picker..."):
-    # cap keeps UI stable and avoids huge payloads
-    df_picker = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
+    df_picker = load_stations_df(
+        API_BASE,
+        selected_params_t,
+        selected_huc8s_t,
+        max_points=20000,
+        min_samples=min_samples_ui,
+    )
 
 if df_picker.empty:
-    st.warning("No stations returned for current filters. Try clearing HUC8 filter or changing parameters.")
+    st.warning("No stations returned for current filters. Try lowering min_samples, clearing HUC8 filter, or changing parameters.")
     st.stop()
 
 df_picker = df_picker.copy()
-df_picker["label"] = (
-    df_picker["MonitoringLocationIdentifierCor"].astype(str)
-    + " | lat=" + df_picker["lat"].round(3).astype(str)
-    + ", lon=" + df_picker["lon"].round(3).astype(str)
-)
+
+# label includes sample count if available
+if "n_samples" in df_picker.columns:
+    df_picker["label"] = (
+        df_picker["MonitoringLocationIdentifierCor"].astype(str)
+        + " | n=" + df_picker["n_samples"].fillna(0).astype(int).astype(str)
+        + " | lat=" + df_picker["lat"].round(3).astype(str)
+        + ", lon=" + df_picker["lon"].round(3).astype(str)
+    )
+else:
+    df_picker["label"] = (
+        df_picker["MonitoringLocationIdentifierCor"].astype(str)
+        + " | lat=" + df_picker["lat"].round(3).astype(str)
+        + ", lon=" + df_picker["lon"].round(3).astype(str)
+    )
 
 selected_label = st.selectbox(
     "Select a station (search by typing)",
@@ -442,7 +490,7 @@ if c3.button("Download range CSV from API"):
         start_year=int(start_year),
         end_year=int(end_year),
     )
-    # use retry wrapper
+
     content = None
     last_exc = None
     for i in range(6):
@@ -487,11 +535,16 @@ if st.session_state["show_map"]:
 
     with map_col:
         with st.spinner("Loading stations and building map..."):
-            # IMPORTANT: cap stations to keep UI responsive
-            df_map = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=5000)
+            df_map = load_stations_df(
+                API_BASE,
+                selected_params_t,
+                selected_huc8s_t,
+                max_points=5000,
+                min_samples=min_samples_ui,  # ✅ NEW
+            )
 
             if df_map.empty:
-                st.warning("No stations available (check HUC8/parameter selection).")
+                st.warning("No stations available (check filters or lower min_samples).")
             else:
                 total_stations = len(df_map)
                 st.markdown(f"**Stations shown on map (capped):** {total_stations}")
@@ -503,11 +556,23 @@ if st.session_state["show_map"]:
 
                 for _, row in df_map.iterrows():
                     sid = str(row["MonitoringLocationIdentifierCor"])
+                    n = None
+                    if "n_samples" in df_map.columns:
+                        try:
+                            n = int(row.get("n_samples")) if pd.notna(row.get("n_samples")) else None
+                        except Exception:
+                            n = None
+
+                    tooltip = f"{sid}" if n is None else f"{sid} (n={n})"
+                    popup = f"<b>{sid}</b><br>lat={row['lat']}, lon={row['lon']}"
+                    if n is not None:
+                        popup += f"<br>n_samples={n}"
+
                     folium.CircleMarker(
                         location=[float(row["lat"]), float(row["lon"])],
                         radius=4,
-                        tooltip=sid,
-                        popup=f"<b>{sid}</b><br>lat={row['lat']}, lon={row['lon']}",
+                        tooltip=tooltip,
+                        popup=popup,
                         fill=True,
                     ).add_to(m)
 
@@ -518,7 +583,8 @@ if st.session_state["show_map"]:
                     clicked_sid = folium_result.get("last_object_clicked_tooltip")
 
                 if clicked_sid:
-                    st.session_state["selected_station_id"] = str(clicked_sid).strip()
+                    # tooltip might be "ID (n=...)" so split safely
+                    st.session_state["selected_station_id"] = str(clicked_sid).split(" (n=")[0].strip()
 
                 if st.session_state["selected_station_id"]:
                     st.caption(f"Selected station_id (from map): {st.session_state['selected_station_id']}")
@@ -584,8 +650,13 @@ with cbtn2:
         st.session_state["show_mean_maps"] = False
 
 if st.session_state["show_mean_maps"]:
-    # cap coords to avoid giant join + giant rendering
-    df_coords = load_stations_df(API_BASE, selected_params_t, selected_huc8s_t, max_points=20000)
+    df_coords = load_stations_df(
+        API_BASE,
+        selected_params_t,
+        selected_huc8s_t,
+        max_points=20000,
+        min_samples=min_samples_ui,  # ✅ NEW: keep consistent with station filter
+    )
     if df_coords.empty:
         st.warning("No station coordinates available for the current filters.")
         st.stop()
@@ -612,7 +683,6 @@ if st.session_state["show_mean_maps"]:
             st.warning(f"No stations with both coordinates and mean values for: {p}")
             continue
 
-        # cap rendering to keep UI stable
         df_join = df_join.head(5000)
 
         vmin = float(df_join["mean_value"].min())
