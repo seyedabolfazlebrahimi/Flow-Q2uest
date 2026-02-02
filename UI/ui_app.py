@@ -389,81 +389,254 @@ if c3.button("Download CSV"):
     )
 
 # ----------------------------
-# 6) Map + Time Series
+# 6) Map + time series plot (+ mean)
 # ----------------------------
 st.header("6) Station Map + Time Series")
 
-df_map = load_stations_df(
-    API_BASE,
-    selected_params_t,
-    selected_huc8s_t,
-    selected_counties_t,
-    max_points=5000,
-    min_samples=min_samples_ui,
-)
+if "show_map" not in st.session_state:
+    st.session_state["show_map"] = False
+if "selected_station_id" not in st.session_state:
+    st.session_state["selected_station_id"] = ""
 
-if not df_map.empty:
-    center_lat = float(df_map["lat"].mean())
-    center_lon = float(df_map["lon"].mean())
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
+btn1, btn2 = st.columns(2)
+with btn1:
+    if st.button("Show map"):
+        st.session_state["show_map"] = True
+with btn2:
+    if st.button("Hide map"):
+        st.session_state["show_map"] = False
 
-    for _, row in df_map.iterrows():
-        folium.CircleMarker(
-            location=[row["lat"], row["lon"]],
-            radius=4,
-            tooltip=row["MonitoringLocationIdentifierCor"],
-            fill=True,
-        ).add_to(m)
+if st.session_state["show_map"]:
+    map_col, plot_col = st.columns([1.2, 1])
 
-    st_folium(m, width=900, height=550)
-else:
-    st.info("No stations to display on map.")
+    # ---------- MAP ----------
+    with map_col:
+        with st.spinner("Loading stations and building map..."):
+            df_map = load_stations_df(
+                API_BASE,
+                selected_params_t,
+                selected_huc8s_t,
+                selected_counties_t,
+                max_points=5000,
+                min_samples=min_samples_ui,
+            )
 
+        if df_map.empty:
+            st.warning("No stations available (check filters or lower min_samples).")
+        else:
+            st.markdown(f"**Stations shown on map (capped):** {len(df_map)}")
+
+            center_lat = float(df_map["lat"].mean())
+            center_lon = float(df_map["lon"].mean())
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
+
+            for _, row in df_map.iterrows():
+                sid = str(row["MonitoringLocationIdentifierCor"])
+
+                n = None
+                if "n_samples" in df_map.columns and pd.notna(row.get("n_samples")):
+                    try:
+                        n = int(row["n_samples"])
+                    except Exception:
+                        n = None
+
+                tooltip = sid if n is None else f"{sid} (n={n})"
+
+                popup = f"<b>{sid}</b><br>lat={row['lat']}, lon={row['lon']}"
+                if n is not None:
+                    popup += f"<br>n_samples={n}"
+
+                folium.CircleMarker(
+                    location=[float(row["lat"]), float(row["lon"])],
+                    radius=4,
+                    tooltip=tooltip,
+                    popup=popup,
+                    fill=True,
+                ).add_to(m)
+
+            folium_result = st_folium(
+                m,
+                width=900,
+                height=550,
+                key="station_map",
+            )
+
+            clicked_sid = None
+            if isinstance(folium_result, dict):
+                clicked_sid = folium_result.get("last_object_clicked_tooltip")
+
+            if clicked_sid:
+                # tooltip might be "ID (n=...)" → extract ID safely
+                st.session_state["selected_station_id"] = (
+                    str(clicked_sid).split(" (n=")[0].strip()
+                )
+
+            if st.session_state["selected_station_id"]:
+                st.caption(
+                    f"Selected station_id (from map): "
+                    f"**{st.session_state['selected_station_id']}**"
+                )
+            else:
+                st.caption("Hover to see sample count. Click a station to plot its time series.")
+
+    # ---------- TIME SERIES ----------
+    with plot_col:
+        st.subheader(f"Concentration vs Time ({plot_param})")
+
+        sid = st.session_state["selected_station_id"]
+        if not sid:
+            st.info("Select a station on the map to display the time series.")
+        else:
+            with st.spinner(f"Fetching data for {sid}..."):
+                df_raw = load_station_data(
+                    API_BASE,
+                    sid,
+                    selected_params_t,
+                    selected_huc8s_t,
+                    selected_counties_t,
+                )
+
+            if df_raw.empty:
+                st.warning("No data found for this station.")
+            else:
+                df_plot_raw = df_raw.copy()
+                if param_col and param_col in df_plot_raw.columns:
+                    df_plot_raw = df_plot_raw[
+                        df_plot_raw[param_col].astype(str).str.strip()
+                        == str(plot_param).strip()
+                    ]
+
+                df_ts = parse_timeseries(df_plot_raw)
+
+                if df_ts.empty:
+                    st.warning("No valid data points after parsing.")
+                else:
+                    mean_val = compute_mean_from_timeseries(df_ts)
+                    st.markdown(
+                        f"**Mean:** {mean_val:.4g}"
+                        if mean_val is not None
+                        else "**Mean:** (not available)"
+                    )
+                    render_timeseries_chart(df_ts, height=350)
+
+                st.download_button(
+                    "Download selected station as CSV",
+                    df_raw.to_csv(index=False).encode("utf-8"),
+                    file_name=f"station_{sid}.csv",
+                    mime="text/csv",
+                )
+
+                with st.expander("Show raw table"):
+                    st.dataframe(df_raw, use_container_width=True)
 # ----------------------------
 # 7) Mean Concentration Map
 # ----------------------------
-st.header("7) Mean Concentration Map")
+st.header("7) Mean Concentration Map (Blue = Low, Red = High)")
 
-for p in selected_params_t:
-    st.subheader(f"Mean Map: {p}")
+st.markdown(
+    "This section creates a separate map for each selected parameter. "
+    "Stations are colored by **mean concentration** at that station."
+)
 
-    df_mean = load_mean_per_station(
+if "show_mean_maps" not in st.session_state:
+    st.session_state["show_mean_maps"] = False
+
+cbtn1, cbtn2 = st.columns(2)
+with cbtn1:
+    if st.button("Show mean maps"):
+        st.session_state["show_mean_maps"] = True
+with cbtn2:
+    if st.button("Hide mean maps"):
+        st.session_state["show_mean_maps"] = False
+
+if st.session_state["show_mean_maps"]:
+    # ---- station coordinates (respect HUC8 / County / min_samples)
+    df_coords = load_stations_df(
         API_BASE,
-        p,
+        selected_params_t,
         selected_huc8s_t,
         selected_counties_t,
+        max_points=20000,
+        min_samples=min_samples_ui,
     )
 
-    if df_mean.empty:
-        st.warning(f"No mean data for {p}")
-        continue
+    if df_coords.empty:
+        st.warning("No station coordinates available for the current filters.")
+        st.stop()
 
-    df_join = df_mean.merge(
-        df_map,
-        on="MonitoringLocationIdentifierCor",
-        how="inner",
-    ).dropna(subset=["lat", "lon", "mean_value"])
+    for i, p in enumerate(selected_params_t):
+        st.subheader(f"Mean Map: {p}")
 
-    if df_join.empty:
-        st.warning("No stations with mean + coordinates.")
-        continue
+        with st.spinner(f"Computing mean per station for {p}..."):
+            df_mean = load_mean_per_station(
+                API_BASE,
+                p,
+                selected_huc8s_t,
+                selected_counties_t,
+            )
 
-    vmin = df_join["mean_value"].min()
-    vmax = df_join["mean_value"].max()
+        if df_mean.empty:
+            st.warning(f"No mean-per-station data returned for: {p}")
+            continue
 
-    m = folium.Map(
-        location=[df_join["lat"].mean(), df_join["lon"].mean()],
-        zoom_start=7,
-    )
+        df_mean["mean_value"] = pd.to_numeric(
+            df_mean.get("mean_value"), errors="coerce"
+        )
+        df_mean = df_mean.dropna(subset=["mean_value"])
 
-    for _, row in df_join.iterrows():
-        color = "#ff0000"
-        folium.CircleMarker(
-            location=[row["lat"], row["lon"]],
-            radius=6,
-            color=color,
-            fill=True,
-            tooltip=row["MonitoringLocationIdentifierCor"],
-        ).add_to(m)
+        # ---- join mean values with coordinates
+        df_join = df_mean.merge(
+            df_coords,
+            on="MonitoringLocationIdentifierCor",
+            how="inner",
+        )
 
-    st_folium(m, width=1100, height=600)
+        df_join["lat"] = pd.to_numeric(df_join["lat"], errors="coerce")
+        df_join["lon"] = pd.to_numeric(df_join["lon"], errors="coerce")
+        df_join = df_join.dropna(subset=["lat", "lon", "mean_value"])
+
+        if df_join.empty:
+            st.warning(f"No stations with both coordinates and mean values for: {p}")
+            continue
+
+        # cap for rendering performance
+        df_join = df_join.head(5000)
+
+        vmin = float(df_join["mean_value"].min())
+        vmax = float(df_join["mean_value"].max())
+
+        st.markdown(f"**Stations on map (capped):** {len(df_join)}")
+        st.caption(f"Mean range: {vmin:.4g} → {vmax:.4g}")
+
+        center_lat = float(df_join["lat"].mean())
+        center_lon = float(df_join["lon"].mean())
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
+
+        add_gradient_legend(m, vmin, vmax, title=f"Mean Concentration ({p})")
+
+        for _, row in df_join.iterrows():
+            sid = str(row["MonitoringLocationIdentifierCor"])
+            mv = float(row["mean_value"])
+            color = value_to_hex_color(mv, vmin, vmax)
+
+            folium.CircleMarker(
+                location=[float(row["lat"]), float(row["lon"])],
+                radius=6,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.85,
+                tooltip=sid,
+                popup=(
+                    f"<b>{sid}</b>"
+                    f"<br>mean={mv:.4g}"
+                    f"<br>lat={row['lat']}, lon={row['lon']}"
+                ),
+            ).add_to(m)
+
+        st_folium(
+            m,
+            width=1100,
+            height=600,
+            key=f"mean_map_{i}",
+        )
