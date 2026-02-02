@@ -93,6 +93,79 @@ def _unpack_station_payload(payload):
         return payload["data"]
     return []
 
+# ----------------------------
+# Time series helpers (ADD THIS)
+# ----------------------------
+def parse_timeseries(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Robust timeseries parser:
+    - Finds a valid date column + value column safely
+    - Returns standardized columns: Date, CuratedResultMeasureValue
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame(columns=["Date", "CuratedResultMeasureValue"])
+
+    df = df_raw.copy()
+
+    date_candidates = [
+        "ActivityStartDate",
+        "ActivityStartDateTime",
+        "Date",
+        "SampleDate",
+        "sample_date",
+    ]
+    date_col = next((c for c in date_candidates if c in df.columns), None)
+
+    value_candidates = [
+        "CuratedResultMeasureValue",
+        "ResultMeasureValue",
+        "Value",
+        "result_value",
+    ]
+    value_col = next((c for c in value_candidates if c in df.columns), None)
+
+    if date_col is None or value_col is None:
+        return pd.DataFrame(columns=["Date", "CuratedResultMeasureValue"])
+
+    df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df["CuratedResultMeasureValue"] = pd.to_numeric(df[value_col], errors="coerce")
+
+    df = df.dropna(subset=["Date", "CuratedResultMeasureValue"]).sort_values("Date")
+    return df[["Date", "CuratedResultMeasureValue"]]
+
+
+def compute_mean_from_timeseries(df_ts: pd.DataFrame):
+    if df_ts is None or df_ts.empty or "CuratedResultMeasureValue" not in df_ts.columns:
+        return None
+    vals = pd.to_numeric(df_ts["CuratedResultMeasureValue"], errors="coerce").dropna()
+    if vals.empty:
+        return None
+    return float(vals.mean())
+
+
+def render_timeseries_chart(df_ts: pd.DataFrame, height: int = 350) -> None:
+    """
+    Altair time series chart using standardized columns from parse_timeseries()
+    """
+    if df_ts is None or df_ts.empty:
+        st.info("No timeseries data to plot.")
+        return
+
+    chart_df = df_ts.rename(columns={"CuratedResultMeasureValue": "Concentration"}).copy()
+
+    base = alt.Chart(chart_df).encode(
+        x=alt.X("Date:T", axis=alt.Axis(title="Year", format="%Y", tickCount="year")),
+        y=alt.Y("Concentration:Q", title="Concentration"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Concentration:Q", title="Concentration"),
+        ],
+    )
+
+    line = base.mark_line()
+    points = base.mark_point(size=40)
+
+    st.altair_chart((line + points).properties(height=height), use_container_width=True)
 
 # ----------------------------
 # Cached loaders
