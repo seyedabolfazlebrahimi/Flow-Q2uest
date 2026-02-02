@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse
 # Config
 # ------------------------------
 CSV_FILE = os.getenv("CSV_FILE", "NWQP-DO.csv")  # local path OR URL
-HUC8_INDEX_URL = (os.getenv("HUC8_INDEX_URL") or "").strip()  # optional: precomputed HUC8 list
+HUC8_INDEX_URL = (os.getenv("HUC8_INDEX_URL") or "").strip()      # optional: precomputed HUC8 list
+COUNTY_INDEX_URL = (os.getenv("COUNTY_INDEX_URL") or "").strip()  # optional: precomputed County list
 
 CANDIDATE_PARAM_COLS = [
     "CuratedConstituent",
@@ -28,6 +29,7 @@ CANDIDATE_PARAM_COLS = [
 ]
 
 HUC8_COL = "HUC8"
+COUNTY_COL = "CountyName"  # ✅ NEW
 DATE_COL = "ActivityStartDate"
 VALUE_COL = "CuratedResultMeasureValue"
 STATION_COL = "MonitoringLocationIdentifierCor"
@@ -35,6 +37,7 @@ LAT_COL = "lat"
 LON_COL = "lon"
 
 INDEX_LOCAL_HUC8 = "/tmp/huc8_list.json"
+INDEX_LOCAL_COUNTY = "/tmp/county_list.json"  # ✅ NEW
 
 DEFAULT_CHUNKSIZE = 200_000
 
@@ -100,19 +103,28 @@ def _read_chunks(
     )
 
 
-def _apply_filters(chunk: pd.DataFrame, parameter, huc8) -> pd.DataFrame:
+def _apply_filters(chunk: pd.DataFrame, parameter=None, huc8=None, county=None) -> pd.DataFrame:
     """
     Applies filters if the relevant columns exist in chunk.
     parameter: Optional[List[str]] or str
     huc8: Optional[List[str]] or str
+    county: Optional[List[str]] or str   ✅ NEW
     """
     param_col = get_param_col()
 
+    # HUC8 filter (unchanged)
     if huc8 and HUC8_COL in chunk.columns:
         hucs = set(_normalize_to_list(huc8))
         if hucs:
             chunk = chunk[chunk[HUC8_COL].astype(str).str.strip().isin(hucs)]
 
+    # County filter (new, additive)
+    if county and COUNTY_COL in chunk.columns:
+        counties = set(_normalize_to_list(county))
+        if counties:
+            chunk = chunk[chunk[COUNTY_COL].astype(str).str.strip().isin(counties)]
+
+    # Parameter filter (unchanged)
     if parameter and param_col and param_col in chunk.columns:
         params = set(_normalize_to_list(parameter))
         if params:
@@ -139,6 +151,24 @@ def _load_huc8_index():
     return None
 
 
+def _load_county_index():
+    """
+    Priority:
+      1) COUNTY_INDEX_URL (download once to /tmp)
+      2) /tmp/county_list.json if exists
+      3) None
+    """
+    if COUNTY_INDEX_URL:
+        if not os.path.exists(INDEX_LOCAL_COUNTY):
+            urllib.request.urlretrieve(COUNTY_INDEX_URL, INDEX_LOCAL_COUNTY)
+
+    if os.path.exists(INDEX_LOCAL_COUNTY):
+        with open(INDEX_LOCAL_COUNTY, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    return None
+
+
 # ------------------------------
 # FastAPI app
 # ------------------------------
@@ -159,9 +189,12 @@ def home():
         "csv_local_path": _local_csv_path(),
         "parameter_column": get_param_col(),
         "huc8_column_present": HUC8_COL in cols,
+        "county_column_present": COUNTY_COL in cols,  # ✅ NEW
         "date_column_present": DATE_COL in cols,
         "huc8_index_url_set": bool(HUC8_INDEX_URL),
         "huc8_index_local_exists": os.path.exists(INDEX_LOCAL_HUC8),
+        "county_index_url_set": bool(COUNTY_INDEX_URL),  # ✅ NEW
+        "county_index_local_exists": os.path.exists(INDEX_LOCAL_COUNTY),  # ✅ NEW
     }
 
 
@@ -188,8 +221,34 @@ def huc8_list():
     return {"huc8_column": HUC8_COL, "huc8_values": sorted(values), "source": "csv_scan"}
 
 
+@app.get("/county-list")
+def county_list():
+    # FAST PATH: precomputed index
+    idx = _load_county_index()
+    if isinstance(idx, dict) and "county_values" in idx:
+        return {
+            "county_column": idx.get("county_column", COUNTY_COL),
+            "county_values": idx.get("county_values", []),
+            "source": "index",
+        }
+
+    cols = get_columns()
+    if COUNTY_COL not in cols:
+        return {"county_column": None, "county_values": [], "source": "csv_scan"}
+
+    values = set()
+    for chunk in _read_chunks(usecols=[COUNTY_COL]):
+        s = chunk[COUNTY_COL].dropna().astype(str).str.strip()
+        values.update(v for v in s.tolist() if v)
+
+    return {"county_column": COUNTY_COL, "county_values": sorted(values), "source": "csv_scan"}
+
+
 @app.get("/parameters")
-def parameters(huc8: Optional[List[str]] = Query(default=None)):
+def parameters(
+    huc8: Optional[List[str]] = Query(default=None),
+    county: Optional[List[str]] = Query(default=None),  # ✅ NEW
+):
     cols = get_columns()
     param_col = get_param_col()
 
@@ -199,10 +258,12 @@ def parameters(huc8: Optional[List[str]] = Query(default=None)):
     usecols = [param_col]
     if HUC8_COL in cols:
         usecols.append(HUC8_COL)
+    if COUNTY_COL in cols:
+        usecols.append(COUNTY_COL)
 
     values = set()
     for chunk in _read_chunks(usecols=usecols):
-        chunk = _apply_filters(chunk, parameter=None, huc8=huc8)
+        chunk = _apply_filters(chunk, parameter=None, huc8=huc8, county=county)
         s = chunk[param_col].dropna().astype(str).str.strip()
         values.update(v for v in s.tolist() if v)
 
@@ -213,6 +274,7 @@ def parameters(huc8: Optional[List[str]] = Query(default=None)):
 def mean_per_station(
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
+    county: Optional[List[str]] = Query(default=None),  # ✅ NEW
 ):
     cols = get_columns()
     param_col = get_param_col()
@@ -224,13 +286,15 @@ def mean_per_station(
     needed = {STATION_COL, VALUE_COL}
     if HUC8_COL in cols:
         needed.add(HUC8_COL)
+    if COUNTY_COL in cols:
+        needed.add(COUNTY_COL)
     if param_col and param_col in cols:
         needed.add(param_col)
 
     sums_counts: Dict[str, Tuple[float, int]] = {}
 
     for chunk in _read_chunks(usecols=list(needed)):
-        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8)
+        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8, county=county)
 
         vals = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
         chunk = chunk.assign(_val=vals).dropna(subset=[STATION_COL, "_val"])
@@ -254,6 +318,7 @@ def station_data(
     station_id: str,
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
+    county: Optional[List[str]] = Query(default=None),  # ✅ NEW
     limit: int = 5000,
 ):
     cols = get_columns()
@@ -269,6 +334,8 @@ def station_data(
             usecols.append(c)
     if HUC8_COL in cols:
         usecols.append(HUC8_COL)
+    if COUNTY_COL in cols:
+        usecols.append(COUNTY_COL)
     if param_col and param_col in cols:
         usecols.append(param_col)
 
@@ -283,7 +350,7 @@ def station_data(
         if sub.empty:
             continue
 
-        sub = _apply_filters(sub, parameter=parameter, huc8=huc8)
+        sub = _apply_filters(sub, parameter=parameter, huc8=huc8, county=county)
         if sub.empty:
             continue
 
@@ -317,6 +384,7 @@ def download_range(
     end_year: int,
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
+    county: Optional[List[str]] = Query(default=None),  # ✅ NEW
 ):
     cols = get_columns()
     if DATE_COL not in cols:
@@ -326,7 +394,7 @@ def download_range(
     first = True
 
     for chunk in _read_chunks():
-        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8)
+        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8, county=county)
 
         if DATE_COL not in chunk.columns:
             continue
@@ -350,7 +418,8 @@ def download_range(
 def stations(
     parameter: Optional[List[str]] = Query(default=None),
     huc8: Optional[List[str]] = Query(default=None),
-    min_samples: int = 1,      # ✅ NEW: minimum number of rows per station (after filters)
+    county: Optional[List[str]] = Query(default=None),  # ✅ NEW
+    min_samples: int = 1,      # minimum number of rows per station (after filters)
     max_points: int = 20000,   # cap to avoid huge RAM usage
 ):
     cols = get_columns()
@@ -369,6 +438,8 @@ def stations(
     needed = [STATION_COL, LAT_COL, LON_COL]
     if HUC8_COL in cols:
         needed.append(HUC8_COL)
+    if COUNTY_COL in cols:
+        needed.append(COUNTY_COL)
     if param_col and param_col in cols:
         needed.append(param_col)
 
@@ -376,7 +447,7 @@ def stations(
     agg: Dict[str, Tuple[float, float, int]] = {}
 
     for chunk in _read_chunks(usecols=needed):
-        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8)
+        chunk = _apply_filters(chunk, parameter=parameter, huc8=huc8, county=county)
         if chunk.empty:
             continue
 
@@ -413,8 +484,6 @@ def stations(
                 agg[sid] = (lat, lon, int(c))
 
         # optional early stop for memory/time:
-        # if we already have a lot of unique stations AND no min_samples filter,
-        # keep behavior close to old cap.
         if len(agg) >= max_points and min_samples <= 1:
             break
 
@@ -426,7 +495,7 @@ def stations(
                     "MonitoringLocationIdentifierCor": sid,
                     "lat": lat,
                     "lon": lon,
-                    "n_samples": n,  # ✅ NEW in response
+                    "n_samples": n,
                 }
             )
 
