@@ -94,7 +94,59 @@ def _unpack_station_payload(payload):
     return []
 
 # ----------------------------
-# Time series helpers (ADD THIS)
+# Visualization helpers
+# ----------------------------
+def value_to_hex_color(v: float, vmin: float, vmax: float) -> str:
+    if v is None or pd.isna(v):
+        return "#888888"
+    if vmax <= vmin:
+        return "#ff0000"
+
+    t = (v - vmin) / (vmax - vmin)
+    t = max(0.0, min(1.0, float(t)))
+
+    r = int(255 * t)
+    g = 0
+    b = int(255 * (1 - t))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def add_gradient_legend(m: folium.Map, vmin: float, vmax: float, title: str):
+    legend_html = f"""
+    <div style="
+        position: fixed;
+        bottom: 30px;
+        left: 30px;
+        z-index: 9999;
+        background: white;
+        padding: 10px 12px;
+        border: 1px solid #bbb;
+        border-radius: 6px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        font-size: 12px;
+        width: 240px;
+    ">
+      <div style="font-weight: 600; margin-bottom: 6px;">{title}</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="min-width:55px;">low</span>
+        <div style="
+          flex:1;
+          height:12px;
+          background: linear-gradient(to right, #0000ff, #ff0000);
+          border:1px solid #999;
+        "></div>
+        <span style="min-width:55px; text-align:right;">high</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin-top:6px;">
+        <span>{vmin:.4g}</span>
+        <span>{vmax:.4g}</span>
+      </div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+# ----------------------------
+# Time series helpers
 # ----------------------------
 def parse_timeseries(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
