@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Tuple, Iterable
 
 import pandas as pd
 import duckdb
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 
 # ==============================
 # Config
@@ -100,6 +100,46 @@ def db_test():
     with get_db_connection() as con:
         n = con.execute("SELECT COUNT(*) FROM wq").fetchone()[0]
     return {"rows_in_db": n}
+
+# ==============================
+# NEW — /huc8-list  ✅
+# ==============================
+@app.get("/huc8-list")
+def huc8_list():
+    with get_db_connection() as con:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT {HUC8_COL}
+            FROM wq
+            WHERE {HUC8_COL} IS NOT NULL
+            ORDER BY {HUC8_COL}
+            """
+        ).fetchall()
+
+    return {
+        "huc8_column": HUC8_COL,
+        "huc8_values": [r[0] for r in rows if r and r[0] is not None],
+    }
+
+# ==============================
+# NEW — /county-list  ✅
+# ==============================
+@app.get("/county-list")
+def county_list():
+    with get_db_connection() as con:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT {COUNTY_COL}
+            FROM wq
+            WHERE {COUNTY_COL} IS NOT NULL
+            ORDER BY {COUNTY_COL}
+            """
+        ).fetchall()
+
+    return {
+        "county_column": COUNTY_COL,
+        "county_values": [r[0] for r in rows if r and r[0] is not None],
+    }
 
 # ==============================
 # FAST — /stations
@@ -253,7 +293,7 @@ def mean_per_station(
     param_col = get_param_col()
 
     if STATION_COL not in cols or VALUE_COL not in cols:
-        return {"error": "Missing required columns"}
+        raise HTTPException(status_code=400, detail="Missing required columns")
 
     needed = [STATION_COL, VALUE_COL]
     if HUC8_COL in cols:
