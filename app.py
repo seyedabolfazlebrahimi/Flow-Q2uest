@@ -1,27 +1,17 @@
 # filename: app.py
 import os
-import json
-import urllib.request
 from functools import lru_cache
-from typing import Optional, List, Union, Dict, Tuple, Iterable
+from typing import Optional, List, Dict, Tuple, Iterable
 
 import pandas as pd
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
 import duckdb
+from fastapi import FastAPI, Query
 
 # ==============================
-# DuckDB (read-only connection)
+# Config
 # ==============================
 DB_FILE = "water_quality.duckdb"
-con = duckdb.connect(DB_FILE, read_only=True)
-
-# ------------------------------
-# Config
-# ------------------------------
 CSV_FILE = os.getenv("CSV_FILE", "NWQP-DO.csv")
-HUC8_INDEX_URL = (os.getenv("HUC8_INDEX_URL") or "").strip()
-COUNTY_INDEX_URL = (os.getenv("COUNTY_INDEX_URL") or "").strip()
 
 CANDIDATE_PARAM_COLS = [
     "CuratedConstituent",
@@ -43,29 +33,27 @@ STATION_COL = "MonitoringLocationIdentifierCor"
 LAT_COL = "lat"
 LON_COL = "lon"
 
-INDEX_LOCAL_HUC8 = "/tmp/huc8_list.json"
-INDEX_LOCAL_COUNTY = "/tmp/county_list.json"
 DEFAULT_CHUNKSIZE = 200_000
 
-# ------------------------------
-# Helpers (CSV – موقت)
-# ------------------------------
+# ==============================
+# DuckDB connection (LAZY)
+# ==============================
+def get_db_connection():
+    return duckdb.connect(DB_FILE, read_only=True)
+
+# ==============================
+# Helpers (CSV – فقط برای mean-per-station)
+# ==============================
 def detect_param_col(columns) -> Optional[str]:
-    cols = set(columns)
     for c in CANDIDATE_PARAM_COLS:
-        if c in cols:
+        if c in columns:
             return c
     return None
 
 
 @lru_cache(maxsize=1)
-def _local_csv_path() -> str:
-    return CSV_FILE
-
-
-@lru_cache(maxsize=1)
 def get_columns() -> List[str]:
-    return list(pd.read_csv(_local_csv_path(), nrows=0).columns)
+    return list(pd.read_csv(CSV_FILE, nrows=0).columns)
 
 
 @lru_cache(maxsize=1)
@@ -78,14 +66,14 @@ def _read_chunks(
     usecols: Optional[List[str]] = None,
 ) -> Iterable[pd.DataFrame]:
     return pd.read_csv(
-        _local_csv_path(),
+        CSV_FILE,
         low_memory=False,
         chunksize=chunksize,
         usecols=usecols,
     )
 
 
-def _apply_filters(chunk: pd.DataFrame, parameter=None, huc8=None, county=None) -> pd.DataFrame:
+def _apply_filters(chunk, parameter=None, huc8=None, county=None):
     param_col = get_param_col()
 
     if huc8 and HUC8_COL in chunk.columns:
@@ -99,25 +87,23 @@ def _apply_filters(chunk: pd.DataFrame, parameter=None, huc8=None, county=None) 
 
     return chunk
 
-
-# ------------------------------
+# ==============================
 # FastAPI app
-# ------------------------------
+# ==============================
 app = FastAPI(title="Water Quality API")
 
-
-# ------------------------------
-# DuckDB sanity check
-# ------------------------------
+# ==============================
+# Sanity check
+# ==============================
 @app.get("/_db-test")
 def db_test():
-    n = con.execute("SELECT COUNT(*) FROM wq").fetchone()[0]
+    with get_db_connection() as con:
+        n = con.execute("SELECT COUNT(*) FROM wq").fetchone()[0]
     return {"rows_in_db": n}
 
-
-# ======================================================
-# 🚀 FAST — DuckDB-based /stations
-# ======================================================
+# ==============================
+# FAST — /stations
+# ==============================
 @app.get("/stations")
 def stations(
     parameter: Optional[List[str]] = Query(default=None),
@@ -126,10 +112,10 @@ def stations(
     min_samples: int = 1,
     max_points: int = 20000,
 ):
+    param_col = get_param_col()
+
     where = []
     params: List = []
-
-    param_col = get_param_col()
 
     if parameter and param_col:
         where.append(f"{param_col} IN ({','.join(['?'] * len(parameter))})")
@@ -159,13 +145,15 @@ def stations(
     """
 
     params.extend([min_samples, max_points])
-    df = con.execute(sql, params).df()
+
+    with get_db_connection() as con:
+        df = con.execute(sql, params).df()
+
     return df.to_dict(orient="records")
 
-
-# ======================================================
-# 🚀 FAST — DuckDB-based /parameters
-# ======================================================
+# ==============================
+# FAST — /parameters
+# ==============================
 @app.get("/parameters")
 def parameters(
     huc8: Optional[List[str]] = Query(default=None),
@@ -195,18 +183,17 @@ def parameters(
         ORDER BY {param_col}
     """
 
-    rows = con.execute(sql, params).fetchall()
-    values = [r[0] for r in rows if r and r[0] is not None]
+    with get_db_connection() as con:
+        rows = con.execute(sql, params).fetchall()
 
     return {
         "parameter_column": param_col,
-        "parameters": values,
+        "parameters": [r[0] for r in rows if r and r[0] is not None],
     }
 
-
-# ======================================================
-# 🚀 FAST — DuckDB-based /station-data   ✅ (مرحله ۶)
-# ======================================================
+# ==============================
+# FAST — /station-data
+# ==============================
 @app.get("/station-data")
 def station_data(
     station_id: str,
@@ -232,32 +219,30 @@ def station_data(
         where.append(f"{COUNTY_COL} IN ({','.join(['?'] * len(county))})")
         params.extend(county)
 
-    where_sql = "WHERE " + " AND ".join(where)
-
     sql = f"""
         SELECT *
         FROM wq
-        {where_sql}
+        WHERE {' AND '.join(where)}
         ORDER BY {DATE_COL}
         LIMIT ?
     """
 
-    params.append(int(limit))
+    params.append(limit)
 
-    df = con.execute(sql, params).df()
+    with get_db_connection() as con:
+        df = con.execute(sql, params).df()
 
     return {
         "station_id": station_id,
         "returned": len(df),
-        "limit": int(limit),
+        "limit": limit,
         "data": df.replace({pd.NA: None}).to_dict(orient="records"),
         "parameter_column": param_col,
     }
 
-
-# ======================================================
-# ⏳ CSV-based — mean-per-station (مرحله بعد)
-# ======================================================
+# ==============================
+# CSV-based — mean-per-station
+# ==============================
 @app.get("/mean-per-station")
 def mean_per_station(
     parameter: Optional[List[str]] = Query(default=None),
