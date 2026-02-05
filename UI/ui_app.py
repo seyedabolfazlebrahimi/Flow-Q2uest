@@ -426,6 +426,7 @@ st.caption(f"Selected station_id: **{station_id_input}**")
 st.divider()
 
 # ----------------------------
+# ----------------------------
 # 4) Station data → CSV (+ plot)
 # ----------------------------
 st.header("4) Station data → CSV (+ plots)")
@@ -538,7 +539,7 @@ with col1:
                 st.altair_chart(ts_chart, use_container_width=True)
 
             # ==================================================
-            # Q vs C (log–log) + POWER-LAW FIT
+            # Q vs C (log–log) + POWER-LAW FIT (CORRECT)
             # ==================================================
             st.subheader("Concentration vs Flow (log–log)")
 
@@ -549,6 +550,12 @@ with col1:
                 if df_qc.empty:
                     st.info("No observations with both concentration and discharge.")
                 else:
+                    # ---- log-transform
+                    df_qc = df_qc.assign(
+                        logQ=np.log10(df_qc["Q"]),
+                        logC=np.log10(df_qc["C"]),
+                    )
+
                     base_qc = alt.Chart(df_qc)
 
                     # ---- Scatter
@@ -574,12 +581,14 @@ with col1:
                         ],
                     )
 
-                    # ---- Power-law fit: C = a Q^b
+                    # ---- Linear regression in log–log space
                     fit = base_qc.transform_regression(
-                        "Q",
-                        "C",
+                        "logQ",
+                        "logC",
                         method="linear",
-                        log=True,
+                    ).transform_calculate(
+                        Q="pow(10, datum.logQ)",
+                        C="pow(10, datum.logC)",
                     ).mark_line(
                         color="black",
                         strokeWidth=2,
@@ -594,7 +603,8 @@ with col1:
                     )
 
                     st.caption(
-                        "Black line shows power-law fit: C = a · Qᵇ (log–log regression)."
+                        "Black line shows power-law fit: C = a · Qᵇ "
+                        "(linear regression in log–log space)."
                     )
             else:
                 st.info("No discharge data available for Q–C analysis.")
@@ -612,6 +622,7 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
+
 
 
 # ----------------------------
