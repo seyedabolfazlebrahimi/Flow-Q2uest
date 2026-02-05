@@ -540,7 +540,7 @@ with col1:
                 st.altair_chart(ts_chart, use_container_width=True)
 
             # ==================================================
-            # Q vs C (log–log) + POWER-LAW FIT (CORRECT)
+            # Q vs C (log–log) + POWER-LAW FIT + R²
             # ==================================================
             st.subheader("Concentration vs Flow (log–log)")
 
@@ -556,6 +556,17 @@ with col1:
                         logQ=np.log10(df_qc["Q"]),
                         logC=np.log10(df_qc["C"]),
                     )
+
+                    # ---- compute slope (b) and R²
+                    x = df_qc["logQ"].values
+                    y = df_qc["logC"].values
+
+                    b, a = np.polyfit(x, y, 1)
+                    y_hat = a + b * x
+
+                    ss_res = np.sum((y - y_hat) ** 2)
+                    ss_tot = np.sum((y - np.mean(y)) ** 2)
+                    r2 = 1 - ss_res / ss_tot
 
                     base_qc = alt.Chart(df_qc)
 
@@ -582,7 +593,7 @@ with col1:
                         ],
                     )
 
-                    # ---- Linear regression in log–log space
+                    # ---- Fit line (red dashed)
                     fit = base_qc.transform_regression(
                         "logQ",
                         "logC",
@@ -591,8 +602,9 @@ with col1:
                         Q="pow(10, datum.logQ)",
                         C="pow(10, datum.logC)",
                     ).mark_line(
-                        color="black",
+                        color="red",
                         strokeWidth=2,
+                        strokeDash=[6, 4],
                     ).encode(
                         x="Q:Q",
                         y="C:Q",
@@ -604,8 +616,7 @@ with col1:
                     )
 
                     st.caption(
-                        "Black line shows power-law fit: C = a · Qᵇ "
-                        "(linear regression in log–log space)."
+                        f"Power-law fit: C = a · Qᵇ  |  b = {b:.2f},  R² = {r2:.2f}"
                     )
             else:
                 st.info("No discharge data available for Q–C analysis.")
@@ -623,8 +634,6 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
-
-
 
 # ----------------------------
 # 5) Download by year range
