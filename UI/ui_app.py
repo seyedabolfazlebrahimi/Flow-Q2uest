@@ -428,7 +428,7 @@ st.divider()
 # ----------------------------
 # 4) Station data → CSV (+ plot)
 # ----------------------------
-st.header("4) Station Data → CSV (with Time Series Plot)")
+st.header("4) Station data → CSV (+ plots)")
 
 col1, col2 = st.columns(2)
 
@@ -447,9 +447,9 @@ with col1:
         else:
             st.success(f"Rows: {len(df_raw)}")
 
-            # ----------------------------
+            # --------------------------------------------------
             # Filter by selected parameter
-            # ----------------------------
+            # --------------------------------------------------
             if param_col and param_col in df_raw.columns:
                 df_plot = df_raw[
                     df_raw[param_col].astype(str).str.strip()
@@ -458,9 +458,9 @@ with col1:
             else:
                 df_plot = df_raw.copy()
 
-            # ----------------------------
+            # --------------------------------------------------
             # Parse Date, Concentration, Flow
-            # ----------------------------
+            # --------------------------------------------------
             df_plot["Date"] = pd.to_datetime(
                 df_plot.get("ActivityStartDate", df_plot.get("Date")),
                 errors="coerce",
@@ -478,20 +478,20 @@ with col1:
 
             df_plot = df_plot.dropna(subset=["Date", "C"]).sort_values("Date")
 
-            # ----------------------------
-            # Dual-axis time series (C + Q)
-            # ----------------------------
+            # ==================================================
+            # Dual-axis time series (C + Q) — NO MARKERS
+            # ==================================================
             if df_plot.empty:
                 st.warning("No valid concentration data after filtering.")
             else:
                 mean_val = df_plot["C"].mean()
-                st.markdown(f"**Mean concentration:** {mean_val:.4g}")
+                st.markdown(f"**Mean concentration:** {mean_val:.4g} mg/L")
 
                 base = alt.Chart(df_plot).encode(
                     x=alt.X("Date:T", title="Date")
                 )
 
-                # ---- Concentration (left axis, blue, with markers)
+                # ---- Concentration (left axis, blue)
                 c_line = base.mark_line(
                     color="#0072B2",
                     strokeWidth=2,
@@ -500,34 +500,24 @@ with col1:
                         "C:Q",
                         title="Concentration (mg/L)",
                         axis=alt.Axis(titleColor="#0072B2"),
-                    )
-                )
-
-                c_points = base.mark_circle(
-                    color="#0072B2",
-                    size=35,
-                    opacity=0.7,
-                ).encode(
-                    y="C:Q",
+                    ),
                     tooltip=[
                         alt.Tooltip("Date:T", title="Date"),
                         alt.Tooltip("C:Q", title="Concentration (mg/L)"),
                     ],
                 )
 
-                c_layer = c_line + c_points
-
-                # ---- Discharge (right axis, dark orange, line only)
+                # ---- Discharge (right axis, dark orange)
                 if df_plot["Q"].notna().any():
                     q_line = base.mark_line(
-                        color="#d95f02",
+                        color="#D55E00",
                         strokeWidth=2,
-                        opacity=0.8,
+                        opacity=0.85,
                     ).encode(
                         y=alt.Y(
                             "Q:Q",
                             title="Discharge (m³/s)",
-                            axis=alt.Axis(titleColor="#d95f02"),
+                            axis=alt.Axis(titleColor="#D55E00"),
                         ),
                         tooltip=[
                             alt.Tooltip("Date:T", title="Date"),
@@ -536,20 +526,20 @@ with col1:
                     )
 
                     ts_chart = alt.layer(
-                        c_layer,
+                        c_line,
                         q_line
                     ).resolve_scale(
                         y="independent"
                     )
                 else:
-                    ts_chart = c_layer
+                    ts_chart = c_line
                     st.caption("No discharge data available for this station.")
 
                 st.altair_chart(ts_chart, use_container_width=True)
 
-            # ----------------------------
-            # Q vs C (log–log scatter)
-            # ----------------------------
+            # ==================================================
+            # Q vs C (log–log) + POWER-LAW FIT
+            # ==================================================
             st.subheader("Concentration vs Flow (log–log)")
 
             if df_plot["Q"].notna().any():
@@ -559,7 +549,10 @@ with col1:
                 if df_qc.empty:
                     st.info("No observations with both concentration and discharge.")
                 else:
-                    qc_chart = alt.Chart(df_qc).mark_circle(
+                    base_qc = alt.Chart(df_qc)
+
+                    # ---- Scatter
+                    scatter = base_qc.mark_circle(
                         size=60,
                         opacity=0.6,
                         color="#0072B2",
@@ -581,16 +574,34 @@ with col1:
                         ],
                     )
 
-                    st.altair_chart(qc_chart, use_container_width=True)
+                    # ---- Power-law fit: C = a Q^b
+                    fit = base_qc.transform_regression(
+                        "Q",
+                        "C",
+                        method="linear",
+                        log=True,
+                    ).mark_line(
+                        color="black",
+                        strokeWidth=2,
+                    ).encode(
+                        x="Q:Q",
+                        y="C:Q",
+                    )
+
+                    st.altair_chart(
+                        scatter + fit,
+                        use_container_width=True,
+                    )
+
                     st.caption(
-                        "Only observations with available discharge (CuratedQ) are shown."
+                        "Black line shows power-law fit: C = a · Qᵇ (log–log regression)."
                     )
             else:
                 st.info("No discharge data available for Q–C analysis.")
 
-            # ----------------------------
+            # ==================================================
             # Raw table + download
-            # ----------------------------
+            # ==================================================
             st.dataframe(df_raw, use_container_width=True)
             st.download_button(
                 "Download station CSV",
@@ -601,6 +612,7 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
+
 
 # ----------------------------
 # 5) Download by year range
