@@ -465,6 +465,7 @@ with col1:
                 df_plot.get("ActivityStartDate", df_plot.get("Date")),
                 errors="coerce",
             )
+
             df_plot["C"] = pd.to_numeric(
                 df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
                 errors="coerce",
@@ -490,23 +491,33 @@ with col1:
                     x=alt.X("Date:T", title="Date")
                 )
 
-                # Concentration — left axis (blue)
+                # ---- Concentration (left axis, blue, with markers)
                 c_line = base.mark_line(
-                    color="#1f77b4",
+                    color="#0072B2",
                     strokeWidth=2,
                 ).encode(
                     y=alt.Y(
                         "C:Q",
-                        title="Concentration",
-                        axis=alt.Axis(titleColor="#1f77b4"),
-                    ),
+                        title="Concentration (mg/L)",
+                        axis=alt.Axis(titleColor="#0072B2"),
+                    )
+                )
+
+                c_points = base.mark_circle(
+                    color="#0072B2",
+                    size=35,
+                    opacity=0.7,
+                ).encode(
+                    y="C:Q",
                     tooltip=[
                         alt.Tooltip("Date:T", title="Date"),
-                        alt.Tooltip("C:Q", title="Concentration"),
+                        alt.Tooltip("C:Q", title="Concentration (mg/L)"),
                     ],
                 )
 
-                # Flow — right axis (dark orange), only if exists
+                c_layer = c_line + c_points
+
+                # ---- Discharge (right axis, dark orange, line only)
                 if df_plot["Q"].notna().any():
                     q_line = base.mark_line(
                         color="#d95f02",
@@ -524,11 +535,14 @@ with col1:
                         ],
                     )
 
-                    ts_chart = alt.layer(c_line, q_line).resolve_scale(
+                    ts_chart = alt.layer(
+                        c_layer,
+                        q_line
+                    ).resolve_scale(
                         y="independent"
                     )
                 else:
-                    ts_chart = c_line
+                    ts_chart = c_layer
                     st.caption("No discharge data available for this station.")
 
                 st.altair_chart(ts_chart, use_container_width=True)
@@ -546,7 +560,9 @@ with col1:
                     st.info("No observations with both concentration and discharge.")
                 else:
                     qc_chart = alt.Chart(df_qc).mark_circle(
-                        size=60, opacity=0.6
+                        size=60,
+                        opacity=0.6,
+                        color="#0072B2",
                     ).encode(
                         x=alt.X(
                             "Q:Q",
@@ -556,12 +572,12 @@ with col1:
                         y=alt.Y(
                             "C:Q",
                             scale=alt.Scale(type="log"),
-                            title="Concentration",
+                            title="Concentration (mg/L)",
                         ),
                         tooltip=[
                             alt.Tooltip("Date:T", title="Date"),
                             alt.Tooltip("Q:Q", title="Q (m³/s)"),
-                            alt.Tooltip("C:Q", title="Concentration"),
+                            alt.Tooltip("C:Q", title="Concentration (mg/L)"),
                         ],
                     )
 
@@ -585,8 +601,6 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
-
-
 
 # ----------------------------
 # 5) Download by year range
