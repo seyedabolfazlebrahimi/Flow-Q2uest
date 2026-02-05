@@ -447,36 +447,95 @@ with col1:
         else:
             st.success(f"Rows: {len(df_raw)}")
 
+            # ----------------------------
+            # Filter by selected parameter
+            # ----------------------------
             if param_col and param_col in df_raw.columns:
                 df_plot = df_raw[
                     df_raw[param_col].astype(str).str.strip()
                     == str(plot_param).strip()
-                ]
+                ].copy()
             else:
                 df_plot = df_raw.copy()
 
-            if not df_plot.empty:
-                df_plot["Date"] = pd.to_datetime(
-                    df_plot.get("ActivityStartDate", df_plot.get("Date")),
-                    errors="coerce",
-                )
-                df_plot["Value"] = pd.to_numeric(
-                    df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
-                    errors="coerce",
-                )
-                df_plot = df_plot.dropna(subset=["Date", "Value"]).sort_values("Date")
+            # ----------------------------
+            # Parse Date & Concentration
+            # ----------------------------
+            df_plot["Date"] = pd.to_datetime(
+                df_plot.get("ActivityStartDate", df_plot.get("Date")),
+                errors="coerce",
+            )
+            df_plot["Value"] = pd.to_numeric(
+                df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
+                errors="coerce",
+            )
 
-                if not df_plot.empty:
-                    mean_val = df_plot["Value"].mean()
-                    st.markdown(f"**Mean:** {mean_val:.4g}")
+            df_plot = df_plot.dropna(subset=["Date", "Value"]).sort_values("Date")
 
-                    chart = alt.Chart(df_plot).mark_line(point=True).encode(
-                        x="Date:T",
-                        y="Value:Q",
-                        tooltip=["Date:T", "Value:Q"],
+            # ----------------------------
+            # Time series plot
+            # ----------------------------
+            if df_plot.empty:
+                st.warning("No valid concentration data after filtering.")
+            else:
+                mean_val = df_plot["Value"].mean()
+                st.markdown(f"**Mean:** {mean_val:.4g}")
+
+                ts_chart = alt.Chart(df_plot).mark_line(point=True).encode(
+                    x=alt.X("Date:T", title="Date"),
+                    y=alt.Y("Value:Q", title="Concentration"),
+                    tooltip=["Date:T", "Value:Q"],
+                )
+                st.altair_chart(ts_chart, use_container_width=True)
+
+            # ----------------------------
+            # Q vs C (log–log scatter)
+            # ----------------------------
+            st.subheader("Concentration vs Flow (log–log)")
+
+            if "CuratedQ" not in df_plot.columns:
+                st.info("No discharge (CuratedQ) column available for this station.")
+            else:
+                df_qc = df_plot.copy()
+
+                df_qc["Q"] = pd.to_numeric(df_qc["CuratedQ"], errors="coerce")
+                df_qc["C"] = pd.to_numeric(df_qc["Value"], errors="coerce")
+
+                # Rule 1: only rows with both Q and C
+                df_qc = df_qc.dropna(subset=["Q", "C"])
+                df_qc = df_qc[(df_qc["Q"] > 0) & (df_qc["C"] > 0)]
+
+                if df_qc.empty:
+                    st.info("No observations with both concentration and discharge.")
+                else:
+                    qc_chart = alt.Chart(df_qc).mark_circle(
+                        size=60, opacity=0.6
+                    ).encode(
+                        x=alt.X(
+                            "Q:Q",
+                            scale=alt.Scale(type="log"),
+                            title="Discharge Q (m³/s)",
+                        ),
+                        y=alt.Y(
+                            "C:Q",
+                            scale=alt.Scale(type="log"),
+                            title="Concentration",
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Date:T", title="Date"),
+                            alt.Tooltip("Q:Q", title="Q (m³/s)"),
+                            alt.Tooltip("C:Q", title="Concentration"),
+                        ],
                     )
-                    st.altair_chart(chart, use_container_width=True)
 
+                    st.altair_chart(qc_chart, use_container_width=True)
+                    st.caption(
+                        "Only observations with available discharge (CuratedQ) are shown."
+                    )
+
+            # ----------------------------
+            # Raw table + download
+            # ----------------------------
             st.dataframe(df_raw, use_container_width=True)
             st.download_button(
                 "Download station CSV",
@@ -487,6 +546,7 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
+
 
 # ----------------------------
 # 5) Download by year range
