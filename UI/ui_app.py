@@ -459,33 +459,78 @@ with col1:
                 df_plot = df_raw.copy()
 
             # ----------------------------
-            # Parse Date & Concentration
+            # Parse Date, Concentration, Flow
             # ----------------------------
             df_plot["Date"] = pd.to_datetime(
                 df_plot.get("ActivityStartDate", df_plot.get("Date")),
                 errors="coerce",
             )
-            df_plot["Value"] = pd.to_numeric(
+            df_plot["C"] = pd.to_numeric(
                 df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
                 errors="coerce",
             )
 
-            df_plot = df_plot.dropna(subset=["Date", "Value"]).sort_values("Date")
+            if "CuratedQ" in df_plot.columns:
+                df_plot["Q"] = pd.to_numeric(df_plot["CuratedQ"], errors="coerce")
+            else:
+                df_plot["Q"] = pd.NA
+
+            df_plot = df_plot.dropna(subset=["Date", "C"]).sort_values("Date")
 
             # ----------------------------
-            # Time series plot
+            # Dual-axis time series (C + Q)
             # ----------------------------
             if df_plot.empty:
                 st.warning("No valid concentration data after filtering.")
             else:
-                mean_val = df_plot["Value"].mean()
-                st.markdown(f"**Mean:** {mean_val:.4g}")
+                mean_val = df_plot["C"].mean()
+                st.markdown(f"**Mean concentration:** {mean_val:.4g}")
 
-                ts_chart = alt.Chart(df_plot).mark_line(point=True).encode(
-                    x=alt.X("Date:T", title="Date"),
-                    y=alt.Y("Value:Q", title="Concentration"),
-                    tooltip=["Date:T", "Value:Q"],
+                base = alt.Chart(df_plot).encode(
+                    x=alt.X("Date:T", title="Date")
                 )
+
+                # Concentration — left axis (blue)
+                c_line = base.mark_line(
+                    color="#1f77b4",
+                    strokeWidth=2,
+                ).encode(
+                    y=alt.Y(
+                        "C:Q",
+                        title="Concentration",
+                        axis=alt.Axis(titleColor="#1f77b4"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Date"),
+                        alt.Tooltip("C:Q", title="Concentration"),
+                    ],
+                )
+
+                # Flow — right axis (dark orange), only if exists
+                if df_plot["Q"].notna().any():
+                    q_line = base.mark_line(
+                        color="#d95f02",
+                        strokeWidth=2,
+                        opacity=0.8,
+                    ).encode(
+                        y=alt.Y(
+                            "Q:Q",
+                            title="Discharge (m³/s)",
+                            axis=alt.Axis(titleColor="#d95f02"),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Date:T", title="Date"),
+                            alt.Tooltip("Q:Q", title="Discharge (m³/s)"),
+                        ],
+                    )
+
+                    ts_chart = alt.layer(c_line, q_line).resolve_scale(
+                        y="independent"
+                    )
+                else:
+                    ts_chart = c_line
+                    st.caption("No discharge data available for this station.")
+
                 st.altair_chart(ts_chart, use_container_width=True)
 
             # ----------------------------
@@ -493,16 +538,8 @@ with col1:
             # ----------------------------
             st.subheader("Concentration vs Flow (log–log)")
 
-            if "CuratedQ" not in df_plot.columns:
-                st.info("No discharge (CuratedQ) column available for this station.")
-            else:
-                df_qc = df_plot.copy()
-
-                df_qc["Q"] = pd.to_numeric(df_qc["CuratedQ"], errors="coerce")
-                df_qc["C"] = pd.to_numeric(df_qc["Value"], errors="coerce")
-
-                # Rule 1: only rows with both Q and C
-                df_qc = df_qc.dropna(subset=["Q", "C"])
+            if df_plot["Q"].notna().any():
+                df_qc = df_plot.dropna(subset=["Q", "C"])
                 df_qc = df_qc[(df_qc["Q"] > 0) & (df_qc["C"] > 0)]
 
                 if df_qc.empty:
@@ -532,6 +569,8 @@ with col1:
                     st.caption(
                         "Only observations with available discharge (CuratedQ) are shown."
                     )
+            else:
+                st.info("No discharge data available for Q–C analysis.")
 
             # ----------------------------
             # Raw table + download
@@ -546,6 +585,7 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
+
 
 
 # ----------------------------
