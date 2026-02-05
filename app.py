@@ -1,11 +1,13 @@
 # filename: app.py
 import os
+import io
 from functools import lru_cache
 from typing import Optional, List, Dict, Tuple, Iterable
 
 import pandas as pd
 import duckdb
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import StreamingResponse
 
 # ==============================
 # Config
@@ -102,7 +104,7 @@ def db_test():
     return {"rows_in_db": n}
 
 # ==============================
-# NEW — /huc8-list  ✅
+# /huc8-list
 # ==============================
 @app.get("/huc8-list")
 def huc8_list():
@@ -122,7 +124,7 @@ def huc8_list():
     }
 
 # ==============================
-# NEW — /county-list  ✅
+# /county-list
 # ==============================
 @app.get("/county-list")
 def county_list():
@@ -142,7 +144,7 @@ def county_list():
     }
 
 # ==============================
-# FAST — /stations
+# /stations
 # ==============================
 @app.get("/stations")
 def stations(
@@ -153,7 +155,6 @@ def stations(
     max_points: int = 20000,
 ):
     param_col = get_param_col()
-
     where = []
     params: List = []
 
@@ -192,7 +193,7 @@ def stations(
     return df.to_dict(orient="records")
 
 # ==============================
-# FAST — /parameters
+# /parameters
 # ==============================
 @app.get("/parameters")
 def parameters(
@@ -232,7 +233,7 @@ def parameters(
     }
 
 # ==============================
-# FAST — /station-data
+# /station-data
 # ==============================
 @app.get("/station-data")
 def station_data(
@@ -243,7 +244,6 @@ def station_data(
     limit: int = 5000,
 ):
     param_col = get_param_col()
-
     where = [f"{STATION_COL} = ?"]
     params: List = [station_id]
 
@@ -281,7 +281,7 @@ def station_data(
     }
 
 # ==============================
-# CSV-based — mean-per-station
+# /mean-per-station (CSV-based)
 # ==============================
 @app.get("/mean-per-station")
 def mean_per_station(
@@ -320,3 +320,59 @@ def mean_per_station(
         for sid, (s, c) in sums.items()
         if c > 0
     ]
+
+# ==============================
+# /download-range  ✅ NEW
+# ==============================
+@app.get("/download-range")
+def download_range(
+    start_year: int,
+    end_year: int,
+    parameter: Optional[List[str]] = Query(default=None),
+    huc8: Optional[List[str]] = Query(default=None),
+    county: Optional[List[str]] = Query(default=None),
+):
+    param_col = get_param_col()
+
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-12-31"
+
+    where = [
+        f"{DATE_COL} IS NOT NULL",
+        f"{DATE_COL} >= ?",
+        f"{DATE_COL} <= ?",
+    ]
+    params: List = [start_date, end_date]
+
+    if parameter and param_col:
+        where.append(f"{param_col} IN ({','.join(['?'] * len(parameter))})")
+        params.extend(parameter)
+
+    if huc8:
+        where.append(f"{HUC8_COL} IN ({','.join(['?'] * len(huc8))})")
+        params.extend(huc8)
+
+    if county:
+        where.append(f"{COUNTY_COL} IN ({','.join(['?'] * len(county))})")
+        params.extend(county)
+
+    sql = f"""
+        SELECT *
+        FROM wq
+        WHERE {' AND '.join(where)}
+        ORDER BY {DATE_COL}
+    """
+
+    with get_db_connection() as con:
+        df = con.execute(sql, params).df()
+
+    buf = io.StringIO()
+    if not df.empty:
+        df.to_csv(buf, index=False)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=subset.csv"},
+    )
