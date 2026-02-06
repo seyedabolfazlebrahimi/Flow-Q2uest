@@ -676,15 +676,18 @@ if c3.button("Download CSV"):
 # ==================================================
 # ==================================================
 # ==================================================
+# ==================================================
 # 6) Station Map + Time Series + Q–C
 # ==================================================
 st.header("6) Station Map + Time Series + Q–C")
 
+# ---- session state
 if "show_map" not in st.session_state:
     st.session_state["show_map"] = False
 if "selected_station_id" not in st.session_state:
     st.session_state["selected_station_id"] = None
 
+# ---- show / hide buttons
 cbtn1, cbtn2 = st.columns(2)
 with cbtn1:
     if st.button("Show map"):
@@ -696,9 +699,9 @@ with cbtn2:
 if st.session_state["show_map"]:
     map_col, plot_col = st.columns([1.2, 1])
 
-    # -----------------------------
-    # MAP
-    # -----------------------------
+    # --------------------------------------------------
+    # MAP (hover = summary, click = select station)
+    # --------------------------------------------------
     with map_col:
         with st.spinner("Loading stations..."):
             df_map = load_stations_df(
@@ -713,7 +716,7 @@ if st.session_state["show_map"]:
         if df_map.empty:
             st.warning("No stations available.")
         else:
-            # ---- mean concentration per station (for hover)
+            # ---- mean concentration (for hover)
             df_mean = load_mean_per_station(
                 API_BASE,
                 plot_param,
@@ -747,14 +750,14 @@ if st.session_state["show_map"]:
                     else "NA"
                 )
 
-                # ---- hover (summary only)
+                # ---- hover summary
                 tooltip = folium.Tooltip(
                     f"{sid}<br>"
                     f"n = {n}<br>"
                     f"mean = {mean_c}"
                 )
 
-                # ---- click (used to select station)
+                # ---- click selector
                 popup = folium.Popup(f"<b>{sid}</b>", max_width=200)
 
                 folium.CircleMarker(
@@ -791,9 +794,9 @@ if st.session_state["show_map"]:
             else:
                 st.caption("Hover = summary | Click = show plots")
 
-    # -----------------------------
-    # PLOTS (IDENTICAL TO SECTION 4)
-    # -----------------------------
+    # --------------------------------------------------
+    # PLOTS (reused from Section 4)
+    # --------------------------------------------------
     with plot_col:
         sid = st.session_state["selected_station_id"]
 
@@ -822,7 +825,6 @@ if st.session_state["show_map"]:
                 file_name=f"station_{sid}.csv",
                 mime="text/csv",
             )
-
 
 
 # ----------------------------
