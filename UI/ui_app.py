@@ -428,7 +428,7 @@ st.divider()
 
 # ----------------------------
 # ----------------------------
-# 4) Station data → CSV (+ plot)
+# 4) Station data → CSV (+ plots)
 # ----------------------------
 st.header("4) Station data → CSV (+ plots)")
 
@@ -481,14 +481,32 @@ with col1:
             df_plot = df_plot.dropna(subset=["Date", "C"]).sort_values("Date")
 
             # ==================================================
-            # Dual-axis time series (C + Q) — NO MARKERS
+            # Mean values (C + Q) — colored
             # ==================================================
             if df_plot.empty:
                 st.warning("No valid concentration data after filtering.")
             else:
-                mean_val = df_plot["C"].mean()
-                st.markdown(f"**Mean concentration:** {mean_val:.4g} mg/L")
+                mean_c = df_plot["C"].mean()
 
+                if df_plot["Q"].notna().any():
+                    mean_q = df_plot["Q"].dropna().mean()
+
+                    st.markdown(
+                        f"""
+                        <span style="color:#0072B2"><b>Mean concentration:</b> {mean_c:.4g} mg/L</span><br>
+                        <span style="color:#D55E00"><b>Mean discharge:</b> {mean_q:.4g} m³/s</span>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"<span style='color:#0072B2'><b>Mean concentration:</b> {mean_c:.4g} mg/L</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                # ==================================================
+                # Dual-axis time series (C + Q) — NO MARKERS
+                # ==================================================
                 base = alt.Chart(df_plot).encode(
                     x=alt.X("Date:T", title="Date")
                 )
@@ -551,13 +569,11 @@ with col1:
                 if df_qc.empty:
                     st.info("No observations with both concentration and discharge.")
                 else:
-                    # ---- log-transform
                     df_qc = df_qc.assign(
                         logQ=np.log10(df_qc["Q"]),
                         logC=np.log10(df_qc["C"]),
                     )
 
-                    # ---- compute slope (b) and R²
                     x = df_qc["logQ"].values
                     y = df_qc["logC"].values
 
@@ -570,7 +586,6 @@ with col1:
 
                     base_qc = alt.Chart(df_qc)
 
-                    # ---- Scatter
                     scatter = base_qc.mark_circle(
                         size=60,
                         opacity=0.6,
@@ -593,7 +608,6 @@ with col1:
                         ],
                     )
 
-                    # ---- Fit line (red dashed)
                     fit = base_qc.transform_regression(
                         "logQ",
                         "logC",
@@ -610,10 +624,7 @@ with col1:
                         y="C:Q",
                     )
 
-                    st.altair_chart(
-                        scatter + fit,
-                        use_container_width=True,
-                    )
+                    st.altair_chart(scatter + fit, use_container_width=True)
 
                     st.caption(
                         f"Power-law fit: C = a · Qᵇ  |  b = {b:.2f},  R² = {r2:.2f}"
@@ -634,6 +645,7 @@ with col1:
 
 with col2:
     st.info("Station selected from picker above.")
+
 
 # ----------------------------
 # 5) Download by year range
