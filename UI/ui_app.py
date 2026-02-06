@@ -676,7 +676,6 @@ if c3.button("Download CSV"):
 # ==================================================
 # ==================================================
 # ==================================================
-# ==================================================
 # 6) Station Map + Time Series + Q–C (FULL reuse of Section 4)
 # ==================================================
 st.header("6) Station Map + Time Series + Q–C")
@@ -868,8 +867,52 @@ if st.session_state["show_map"]:
                             )
                         )
                         st.altair_chart(
-                            alt.layer(c_l_
+                            alt.layer(c_line, q_line).resolve_scale(y="independent"),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.altair_chart(c_line, use_container_width=True)
 
+                    # ---- Q–C log–log + power law
+                    st.subheader("Concentration vs Flow (log–log)")
+
+                    df_qc = df_plot.dropna(subset=["Q", "C"])
+                    df_qc = df_qc[(df_qc["Q"] > 0) & (df_qc["C"] > 0)]
+
+                    if not df_qc.empty:
+                        df_qc["logQ"] = np.log10(df_qc["Q"])
+                        df_qc["logC"] = np.log10(df_qc["C"])
+
+                        b, a = np.polyfit(df_qc["logQ"], df_qc["logC"], 1)
+                        r2 = np.corrcoef(df_qc["logQ"], df_qc["logC"])[0, 1] ** 2
+
+                        scatter = alt.Chart(df_qc).mark_circle(
+                            size=60, opacity=0.6, color="#0072B2"
+                        ).encode(
+                            x=alt.X("Q:Q", scale=alt.Scale(type="log"), title="Discharge (m³/s)"),
+                            y=alt.Y("C:Q", scale=alt.Scale(type="log"), title="Concentration (mg/L)"),
+                        )
+
+                        fit = alt.Chart(df_qc).transform_regression(
+                            "logQ", "logC"
+                        ).transform_calculate(
+                            Q="pow(10, datum.logQ)",
+                            C="pow(10, datum.logC)",
+                        ).mark_line(
+                            color="red", strokeDash=[6, 4], strokeWidth=2
+                        ).encode(
+                            x="Q:Q", y="C:Q"
+                        )
+
+                        st.altair_chart(scatter + fit, use_container_width=True)
+                        st.caption(f"Power-law fit: C = a·Qᵇ | b = {b:.2f}, R² = {r2:.2f}")
+
+                st.download_button(
+                    "Download station CSV",
+                    df_raw.to_csv(index=False).encode("utf-8"),
+                    file_name=f"station_{sid}.csv",
+                    mime="text/csv",
+                )
 
 
 # ----------------------------
