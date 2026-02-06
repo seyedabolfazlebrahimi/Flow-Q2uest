@@ -675,10 +675,144 @@ if c3.button("Download CSV"):
 # ----------------------------
 # ==================================================
 # ==================================================
-# ==================================================
-# ==================================================
 # 6) Station Map + Time Series + Q–C
 # ==================================================
+def render_station_plots(df_raw, plot_param, param_col):
+    if df_raw is None or df_raw.empty:
+        st.warning("No data returned for this station.")
+        return
+
+    # ---- filter by parameter
+    if param_col and param_col in df_raw.columns:
+        df_plot = df_raw[
+            df_raw[param_col].astype(str).str.strip()
+            == str(plot_param).strip()
+        ].copy()
+    else:
+        df_plot = df_raw.copy()
+
+    df_plot["Date"] = pd.to_datetime(
+        df_plot.get("ActivityStartDate", df_plot.get("Date")),
+        errors="coerce",
+    )
+
+    df_plot["C"] = pd.to_numeric(
+        df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
+        errors="coerce",
+    )
+
+    df_plot["Q"] = (
+        pd.to_numeric(df_plot["CuratedQ"], errors="coerce")
+        if "CuratedQ" in df_plot.columns
+        else pd.NA
+    )
+
+    df_plot = df_plot.dropna(subset=["Date", "C"]).sort_values("Date")
+
+    if df_plot.empty:
+        st.warning("No valid concentration data.")
+        return
+
+    # =========================
+    # Mean values
+    # =========================
+    mean_c = df_plot["C"].mean()
+    if df_plot["Q"].notna().any():
+        mean_q = df_plot["Q"].dropna().mean()
+        st.markdown(
+            f"""
+            <span style="color:#0072B2"><b>Mean concentration:</b> {mean_c:.4g} mg/L</span><br>
+            <span style="color:#D55E00"><b>Mean discharge:</b> {mean_q:.4g} m³/s</span>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<span style='color:#0072B2'><b>Mean concentration:</b> {mean_c:.4g} mg/L</span>",
+            unsafe_allow_html=True,
+        )
+
+    # =========================
+    # Dual-axis time series
+    # =========================
+    base = alt.Chart(df_plot).encode(
+        x=alt.X("Date:T", title="Date")
+    )
+
+    c_line = base.mark_line(
+        color="#0072B2",
+        strokeWidth=2
+    ).encode(
+        y=alt.Y(
+            "C:Q",
+            title="Concentration (mg/L)",
+            axis=alt.Axis(titleColor="#0072B2"),
+        )
+    )
+
+    if df_plot["Q"].notna().any():
+        q_line = base.mark_line(
+            color="#D55E00",
+            strokeWidth=2,
+            opacity=0.85,
+        ).encode(
+            y=alt.Y(
+                "Q:Q",
+                title="Discharge (m³/s)",
+                axis=alt.Axis(titleColor="#D55E00"),
+            )
+        )
+
+        st.altair_chart(
+            alt.layer(c_line, q_line).resolve_scale(y="independent"),
+            use_container_width=True,
+        )
+    else:
+        st.altair_chart(c_line, use_container_width=True)
+
+    # =========================
+    # Q–C log–log
+    # =========================
+    st.subheader("Concentration vs Flow (log–log)")
+
+    df_qc = df_plot.dropna(subset=["Q", "C"])
+    df_qc = df_qc[(df_qc["Q"] > 0) & (df_qc["C"] > 0)]
+
+    if df_qc.empty:
+        st.info("No observations with both concentration and discharge.")
+        return
+
+    df_qc["logQ"] = np.log10(df_qc["Q"])
+    df_qc["logC"] = np.log10(df_qc["C"])
+
+    b, a = np.polyfit(df_qc["logQ"], df_qc["logC"], 1)
+    r2 = np.corrcoef(df_qc["logQ"], df_qc["logC"])[0, 1] ** 2
+
+    scatter = alt.Chart(df_qc).mark_circle(
+        size=60,
+        opacity=0.6,
+        color="#0072B2",
+    ).encode(
+        x=alt.X("Q:Q", scale=alt.Scale(type="log"), title="Discharge (m³/s)"),
+        y=alt.Y("C:Q", scale=alt.Scale(type="log"), title="Concentration (mg/L)"),
+    )
+
+    fit = alt.Chart(df_qc).transform_regression(
+        "logQ", "logC"
+    ).transform_calculate(
+        Q="pow(10, datum.logQ)",
+        C="pow(10, datum.logC)",
+    ).mark_line(
+        color="red",
+        strokeDash=[6, 4],
+        strokeWidth=2,
+    ).encode(
+        x="Q:Q",
+        y="C:Q",
+    )
+
+    st.altair_chart(scatter + fit, use_container_width=True)
+    st.caption(f"Power-law fit: C = a·Qᵇ | b = {b:.2f}, R² = {r2:.2f}")
 st.header("6) Station Map + Time Series + Q–C")
 
 # ---- session state
