@@ -559,7 +559,7 @@ with col1:
             # ==================================================
             # Q vs C (log–log) + POWER-LAW FIT + R²
             # ==================================================
-            st.subheader("Concentration vs Flow (log–log)")
+            st.subheader("C-Q")
 
             if df_plot["Q"].notna().any():
                 df_qc = df_plot.dropna(subset=["Q", "C"])
@@ -766,7 +766,7 @@ if st.session_state["show_map"]:
                     tooltip = sid if n is None else f"{sid} (n={n})"
 
                     popup_html = f"""
-                    <div style="min-width:260px; white-space:nowrap; font-size:13px;">
+                    <div style="min-width:250px; white-space:nowrap; font-size:13px;">
                         <b>Station:</b> {sid}<br>
                         <b>Samples (n):</b> {n if n is not None else "NA"}<br>
                         <b>Mean concentration:</b> {mean_c_str}
