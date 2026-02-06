@@ -673,7 +673,6 @@ if c3.button("Download CSV"):
     )
 
 # ----------------------------
-# ----------------------------
 # ==================================================
 # 6) Station Map + Time Series + Q–C
 # ==================================================
@@ -753,13 +752,16 @@ if st.session_state["show_map"]:
 
                 tooltip = sid if n is None else f"{sid} (n={n})"
 
-                popup_html = (
-                    f"<div style='font-size:12px; line-height:1.45;'>"
-                    f"<div><b>Station:</b> {sid}</div>"
-                    f"<div><b>Samples (n):</b> {n if n is not None else 'NA'}</div>"
-                    f"<div><b>Mean concentration:</b> {mean_c_str}</div>"
-                    f"</div>"
-                )
+                popup_html = f"""
+                <div style="
+                    font-size:12px;
+                    line-height:1.4;
+                ">
+                    <div style="font-weight:600;">{sid}</div>
+                    <div>n = {n if n is not None else "NA"}</div>
+                    <div>mean = {mean_c_str}</div>
+                </div>
+                """
 
                 folium.CircleMarker(
                     location=[float(row["lat"]), float(row["lon"])],
@@ -788,7 +790,8 @@ if st.session_state["show_map"]:
 
             if st.session_state["selected_station_id"]:
                 st.caption(
-                    f"Selected station_id: **{st.session_state['selected_station_id']}**"
+                    f"Selected station_id: "
+                    f"**{st.session_state['selected_station_id']}**"
                 )
             else:
                 st.caption("Hover to see n. Click a station to plot data.")
@@ -874,6 +877,7 @@ if st.session_state["show_map"]:
 
                     st.altair_chart(ts_chart, use_container_width=True)
 
+                    # ---- Q–C log–log + power-law
                     st.subheader("Concentration vs Flow (log–log)")
 
                     df_qc = df_plot.dropna(subset=["Q", "C"])
