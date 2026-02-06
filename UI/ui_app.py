@@ -675,169 +675,39 @@ if c3.button("Download CSV"):
 # ----------------------------
 # ==================================================
 # ==================================================
+# ==================================================
 # 6) Station Map + Time Series + Q–C
 # ==================================================
-def render_station_plots(df_raw, plot_param, param_col):
-    if df_raw is None or df_raw.empty:
-        st.warning("No data returned for this station.")
-        return
 
-    # ---- filter by parameter
-    if param_col and param_col in df_raw.columns:
-        df_plot = df_raw[
-            df_raw[param_col].astype(str).str.strip()
-            == str(plot_param).strip()
-        ].copy()
-    else:
-        df_plot = df_raw.copy()
+st.header("6) Station Map + Time Series")
 
-    df_plot["Date"] = pd.to_datetime(
-        df_plot.get("ActivityStartDate", df_plot.get("Date")),
-        errors="coerce",
-    )
-
-    df_plot["C"] = pd.to_numeric(
-        df_plot.get("CuratedResultMeasureValue", df_plot.get("Value")),
-        errors="coerce",
-    )
-
-    df_plot["Q"] = (
-        pd.to_numeric(df_plot["CuratedQ"], errors="coerce")
-        if "CuratedQ" in df_plot.columns
-        else pd.NA
-    )
-
-    df_plot = df_plot.dropna(subset=["Date", "C"]).sort_values("Date")
-
-    if df_plot.empty:
-        st.warning("No valid concentration data.")
-        return
-
-    # =========================
-    # Mean values
-    # =========================
-    mean_c = df_plot["C"].mean()
-    if df_plot["Q"].notna().any():
-        mean_q = df_plot["Q"].dropna().mean()
-        st.markdown(
-            f"""
-            <span style="color:#0072B2"><b>Mean concentration:</b> {mean_c:.4g} mg/L</span><br>
-            <span style="color:#D55E00"><b>Mean discharge:</b> {mean_q:.4g} m³/s</span>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f"<span style='color:#0072B2'><b>Mean concentration:</b> {mean_c:.4g} mg/L</span>",
-            unsafe_allow_html=True,
-        )
-
-    # =========================
-    # Dual-axis time series
-    # =========================
-    base = alt.Chart(df_plot).encode(
-        x=alt.X("Date:T", title="Date")
-    )
-
-    c_line = base.mark_line(
-        color="#0072B2",
-        strokeWidth=2
-    ).encode(
-        y=alt.Y(
-            "C:Q",
-            title="Concentration (mg/L)",
-            axis=alt.Axis(titleColor="#0072B2"),
-        )
-    )
-
-    if df_plot["Q"].notna().any():
-        q_line = base.mark_line(
-            color="#D55E00",
-            strokeWidth=2,
-            opacity=0.85,
-        ).encode(
-            y=alt.Y(
-                "Q:Q",
-                title="Discharge (m³/s)",
-                axis=alt.Axis(titleColor="#D55E00"),
-            )
-        )
-
-        st.altair_chart(
-            alt.layer(c_line, q_line).resolve_scale(y="independent"),
-            use_container_width=True,
-        )
-    else:
-        st.altair_chart(c_line, use_container_width=True)
-
-    # =========================
-    # Q–C log–log
-    # =========================
-    st.subheader("Concentration vs Flow (log–log)")
-
-    df_qc = df_plot.dropna(subset=["Q", "C"])
-    df_qc = df_qc[(df_qc["Q"] > 0) & (df_qc["C"] > 0)]
-
-    if df_qc.empty:
-        st.info("No observations with both concentration and discharge.")
-        return
-
-    df_qc["logQ"] = np.log10(df_qc["Q"])
-    df_qc["logC"] = np.log10(df_qc["C"])
-
-    b, a = np.polyfit(df_qc["logQ"], df_qc["logC"], 1)
-    r2 = np.corrcoef(df_qc["logQ"], df_qc["logC"])[0, 1] ** 2
-
-    scatter = alt.Chart(df_qc).mark_circle(
-        size=60,
-        opacity=0.6,
-        color="#0072B2",
-    ).encode(
-        x=alt.X("Q:Q", scale=alt.Scale(type="log"), title="Discharge (m³/s)"),
-        y=alt.Y("C:Q", scale=alt.Scale(type="log"), title="Concentration (mg/L)"),
-    )
-
-    fit = alt.Chart(df_qc).transform_regression(
-        "logQ", "logC"
-    ).transform_calculate(
-        Q="pow(10, datum.logQ)",
-        C="pow(10, datum.logC)",
-    ).mark_line(
-        color="red",
-        strokeDash=[6, 4],
-        strokeWidth=2,
-    ).encode(
-        x="Q:Q",
-        y="C:Q",
-    )
-
-    st.altair_chart(scatter + fit, use_container_width=True)
-    st.caption(f"Power-law fit: C = a·Qᵇ | b = {b:.2f}, R² = {r2:.2f}")
-st.header("6) Station Map + Time Series + Q–C")
-
-# ---- session state
 if "show_map" not in st.session_state:
     st.session_state["show_map"] = False
-if "selected_station_id" not in st.session_state:
-    st.session_state["selected_station_id"] = None
 
-# ---- show / hide buttons
-cbtn1, cbtn2 = st.columns(2)
-with cbtn1:
+if "selected_station_id" not in st.session_state:
+    st.session_state["selected_station_id"] = ""
+
+btn1, btn2 = st.columns(2)
+
+with btn1:
     if st.button("Show map"):
         st.session_state["show_map"] = True
-with cbtn2:
+
+with btn2:
     if st.button("Hide map"):
         st.session_state["show_map"] = False
 
+
 if st.session_state["show_map"]:
+
     map_col, plot_col = st.columns([1.2, 1])
 
-    # --------------------------------------------------
-    # MAP (hover = summary, click = select station)
-    # --------------------------------------------------
+    # ==================================================
+    # MAP
+    # ==================================================
     with map_col:
-        with st.spinner("Loading stations..."):
+        with st.spinner("Loading stations and building map..."):
+
             df_map = load_stations_df(
                 API_BASE,
                 selected_params_t,
@@ -847,119 +717,281 @@ if st.session_state["show_map"]:
                 min_samples=min_samples_ui,
             )
 
-        if df_map.empty:
-            st.warning("No stations available.")
-        else:
-            # ---- mean concentration (for hover)
-            df_mean = load_mean_per_station(
-                API_BASE,
-                plot_param,
-                selected_huc8s_t,
-                selected_counties_t,
-            )
-            df_mean["mean_value"] = pd.to_numeric(
-                df_mean.get("mean_value"), errors="coerce"
-            )
+            if df_map.empty:
+                st.warning("No stations available (check filters or lower min_samples).")
 
-            df_map = df_map.merge(
-                df_mean,
-                on="MonitoringLocationIdentifierCor",
-                how="left",
-            )
-
-            center_lat = float(df_map["lat"].mean())
-            center_lon = float(df_map["lon"].mean())
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
-
-            for _, row in df_map.iterrows():
-                sid = str(row["MonitoringLocationIdentifierCor"])
-                n = (
-                    int(row["n_samples"])
-                    if pd.notna(row.get("n_samples"))
-                    else "NA"
-                )
-                mean_c = (
-                    f"{row['mean_value']:.3g} mg/L"
-                    if pd.notna(row.get("mean_value"))
-                    else "NA"
+            else:
+                # ---- load mean concentration (parameter-specific)
+                df_mean_c = load_mean_per_station(
+                    API_BASE,
+                    plot_param,
+                    selected_huc8s_t,
+                    selected_counties_t,
                 )
 
-                # ---- hover summary
-                tooltip = folium.Tooltip(
-                    f"{sid}<br>"
-                    f"n = {n}<br>"
-                    f"mean = {mean_c}"
-                )
-
-                # ---- click selector
-                popup = folium.Popup(f"<b>{sid}</b>", max_width=200)
-
-                folium.CircleMarker(
-                    location=[row["lat"], row["lon"]],
-                    radius=4,
-                    fill=True,
-                    fill_opacity=0.85,
-                    tooltip=tooltip,
-                    popup=popup,
-                ).add_to(m)
-
-            folium_result = st_folium(
-                m,
-                width=900,
-                height=550,
-                key="station_map",
-            )
-
-            # ---- capture clicked station
-            if isinstance(folium_result, dict):
-                clicked_popup = folium_result.get("last_object_clicked_popup")
-                if clicked_popup:
-                    st.session_state["selected_station_id"] = (
-                        clicked_popup
-                        .split("</b>")[0]
-                        .split("<b>")[-1]
-                        .strip()
+                if not df_mean_c.empty:
+                    df_mean_c["mean_value"] = pd.to_numeric(
+                        df_mean_c["mean_value"], errors="coerce"
+                    )
+                else:
+                    df_mean_c = pd.DataFrame(
+                        columns=["MonitoringLocationIdentifierCor", "mean_value"]
                     )
 
-            if st.session_state["selected_station_id"]:
-                st.caption(
-                    f"Selected station: **{st.session_state['selected_station_id']}**"
+                # ---- merge mean concentration into map df
+                df_map2 = df_map.merge(
+                    df_mean_c[["MonitoringLocationIdentifierCor", "mean_value"]],
+                    on="MonitoringLocationIdentifierCor",
+                    how="left",
                 )
-            else:
-                st.caption("Hover = summary | Click = show plots")
 
-    # --------------------------------------------------
-    # PLOTS (reused from Section 4)
-    # --------------------------------------------------
+                center_lat = float(df_map2["lat"].mean())
+                center_lon = float(df_map2["lon"].mean())
+
+                m = folium.Map(
+                    location=[center_lat, center_lon],
+                    zoom_start=7,
+                )
+
+                for _, row in df_map2.iterrows():
+
+                    sid = str(row["MonitoringLocationIdentifierCor"])
+
+                    # n_samples
+                    n = None
+                    if "n_samples" in row and pd.notna(row["n_samples"]):
+                        try:
+                            n = int(row["n_samples"])
+                        except Exception:
+                            pass
+
+                    # mean concentration
+                    mean_c = row.get("mean_value")
+                    mean_c_str = (
+                        f"{mean_c:.3g} mg/L" if pd.notna(mean_c) else "NA"
+                    )
+
+                    tooltip = sid if n is None else f"{sid} (n={n})"
+
+                    popup_html = f"""
+                    <b>Station:</b> {sid}<br>
+                    <b>Samples (n):</b> {n if n is not None else "NA"}<br>
+                    <b>Mean concentration:</b> {mean_c_str}
+                    """
+
+                    folium.CircleMarker(
+                        location=[float(row["lat"]), float(row["lon"])],
+                        radius=4,
+                        tooltip=tooltip,
+                        popup=popup_html,
+                        fill=True,
+                        fill_opacity=0.85,
+                    ).add_to(m)
+
+                folium_result = st_folium(
+                    m,
+                    width=900,
+                    height=550,
+                    key="station_map",
+                )
+
+                clicked_sid = None
+                if isinstance(folium_result, dict):
+                    clicked_sid = folium_result.get("last_object_clicked_tooltip")
+
+                if clicked_sid:
+                    st.session_state["selected_station_id"] = (
+                        str(clicked_sid).split(" (n=")[0].strip()
+                    )
+
+                if st.session_state["selected_station_id"]:
+                    st.caption(
+                        f"Selected station_id: "
+                        f"**{st.session_state['selected_station_id']}**"
+                    )
+                else:
+                    st.caption("Hover to see n. Click a station to plot data.")
+
+    # ==================================================
+    # TIME SERIES + Q–C
+    # ==================================================
     with plot_col:
+
         sid = st.session_state["selected_station_id"]
+        st.subheader(f"Station plots ({plot_param})")
 
         if not sid:
-            st.info("Click a station on the map to display plots.")
+            st.info("Select a station on the map to display plots.")
+
         else:
-            st.subheader(f"Station plots ({plot_param})")
+            with st.spinner(f"Fetching data for {sid}..."):
 
-            df_raw = load_station_data(
-                API_BASE,
-                sid,
-                selected_params_t,
-                selected_huc8s_t,
-                selected_counties_t,
-            )
+                df_raw = load_station_data(
+                    API_BASE,
+                    sid,
+                    selected_params_t,
+                    selected_huc8s_t,
+                    selected_counties_t,
+                )
 
-            render_station_plots(
-                df_raw=df_raw,
-                plot_param=plot_param,
-                param_col=param_col,
-            )
+                if df_raw.empty:
+                    st.warning("No data found for this station.")
 
-            st.download_button(
-                "Download station CSV",
-                df_raw.to_csv(index=False).encode("utf-8"),
-                file_name=f"station_{sid}.csv",
-                mime="text/csv",
-            )
+                else:
+                    # ---- filter parameter
+                    if param_col and param_col in df_raw.columns:
+                        df_plot = df_raw[
+                            df_raw[param_col].astype(str).str.strip()
+                            == str(plot_param).strip()
+                        ].copy()
+                    else:
+                        df_plot = df_raw.copy()
 
+                    # ---- parse
+                    df_plot["Date"] = pd.to_datetime(
+                        df_plot.get("ActivityStartDate", df_plot.get("Date")),
+                        errors="coerce",
+                    )
+
+                    df_plot["C"] = pd.to_numeric(
+                        df_plot.get(
+                            "CuratedResultMeasureValue",
+                            df_plot.get("Value"),
+                        ),
+                        errors="coerce",
+                    )
+
+                    if "CuratedQ" in df_plot.columns:
+                        df_plot["Q"] = pd.to_numeric(
+                            df_plot["CuratedQ"], errors="coerce"
+                        )
+                    else:
+                        df_plot["Q"] = pd.NA
+
+                    df_plot = (
+                        df_plot.dropna(subset=["Date", "C"])
+                        .sort_values("Date")
+                    )
+
+                    if df_plot.empty:
+                        st.warning("No valid data after filtering.")
+
+                    else:
+                        # ---- dual-axis time series
+                        base = alt.Chart(df_plot).encode(
+                            x=alt.X("Date:T", title="Date")
+                        )
+
+                        c_line = base.mark_line(
+                            color="#0072B2",
+                            strokeWidth=2,
+                        ).encode(
+                            y=alt.Y(
+                                "C:Q",
+                                title="Concentration (mg/L)",
+                                axis=alt.Axis(titleColor="#0072B2"),
+                            )
+                        )
+
+                        if df_plot["Q"].notna().any():
+                            q_line = base.mark_line(
+                                color="#D55E00",
+                                strokeWidth=2,
+                                opacity=0.85,
+                            ).encode(
+                                y=alt.Y(
+                                    "Q:Q",
+                                    title="Discharge (m³/s)",
+                                    axis=alt.Axis(titleColor="#D55E00"),
+                                )
+                            )
+
+                            ts_chart = (
+                                alt.layer(c_line, q_line)
+                                .resolve_scale(y="independent")
+                            )
+                        else:
+                            ts_chart = c_line
+
+                        st.altair_chart(
+                            ts_chart,
+                            use_container_width=True,
+                        )
+
+                        # ---- Q–C log–log + power-law
+                        st.subheader("Concentration vs Flow (log–log)")
+
+                        df_qc = df_plot.dropna(subset=["Q", "C"])
+                        df_qc = df_qc[
+                            (df_qc["Q"] > 0) & (df_qc["C"] > 0)
+                        ]
+
+                        if df_qc.empty:
+                            st.info("No Q–C pairs available.")
+
+                        else:
+                            df_qc = df_qc.assign(
+                                logQ=np.log10(df_qc["Q"]),
+                                logC=np.log10(df_qc["C"]),
+                            )
+
+                            x = df_qc["logQ"].values
+                            y = df_qc["logC"].values
+
+                            b, a = np.polyfit(x, y, 1)
+                            y_hat = a + b * x
+
+                            r2 = 1 - np.sum((y - y_hat) ** 2) / np.sum(
+                                (y - np.mean(y)) ** 2
+                            )
+
+                            scatter = alt.Chart(df_qc).mark_circle(
+                                size=60,
+                                opacity=0.6,
+                                color="#0072B2",
+                            ).encode(
+                                x=alt.X(
+                                    "Q:Q",
+                                    scale=alt.Scale(type="log"),
+                                    title="Discharge (m³/s)",
+                                ),
+                                y=alt.Y(
+                                    "C:Q",
+                                    scale=alt.Scale(type="log"),
+                                    title="Concentration (mg/L)",
+                                ),
+                            )
+
+                            fit = (
+                                alt.Chart(df_qc)
+                                .transform_regression("logQ", "logC")
+                                .transform_calculate(
+                                    Q="pow(10, datum.logQ)",
+                                    C="pow(10, datum.logC)",
+                                )
+                                .mark_line(
+                                    color="red",
+                                    strokeDash=[6, 4],
+                                    strokeWidth=2,
+                                )
+                                .encode(x="Q:Q", y="C:Q")
+                            )
+
+                            st.altair_chart(
+                                scatter + fit,
+                                use_container_width=True,
+                            )
+
+                            st.caption(
+                                f"Power-law fit: C = a·Qᵇ | b = {b:.2f}, R² = {r2:.2f}"
+                            )
+
+                            st.download_button(
+                                "Download station CSV",
+                                df_raw.to_csv(index=False).encode("utf-8"),
+                                file_name=f"station_{sid}.csv",
+                                mime="text/csv",
+                            )
 
 # ----------------------------
 # 7) Mean Concentration Map
