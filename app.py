@@ -44,19 +44,72 @@ def get_db_connection():
     return duckdb.connect(DB_FILE, read_only=True)
 
 # ==============================
+# Helpers
+# ==============================
+def detect_param_col(columns) -> Optional[str]:
+    for c in CANDIDATE_PARAM_COLS:
+        if c in columns:
+            return c
+    return None
+
+
+# ✅ NEW — Read columns from DuckDB instead of CSV
+@lru_cache(maxsize=1)
+def get_db_columns() -> List[str]:
+    with get_db_connection() as con:
+        rows = con.execute("PRAGMA table_info('wq')").fetchall()
+    return [r[1] for r in rows]
+
+
+# ✅ FIXED — Now uses DuckDB schema
+@lru_cache(maxsize=1)
+def get_param_col() -> Optional[str]:
+    return detect_param_col(get_db_columns())
+
+
+# CSV helpers (فقط برای mean-per-station)
+@lru_cache(maxsize=1)
+def get_columns() -> List[str]:
+    return list(pd.read_csv(CSV_FILE, nrows=0).columns)
+
+
+def _read_chunks(
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    usecols: Optional[List[str]] = None,
+) -> Iterable[pd.DataFrame]:
+    return pd.read_csv(
+        CSV_FILE,
+        low_memory=False,
+        chunksize=chunksize,
+        usecols=usecols,
+    )
+
+
+def _apply_filters(chunk, parameter=None, huc8=None, county=None):
+    param_col = get_param_col()
+
+    if huc8 and HUC8_COL in chunk.columns:
+        chunk = chunk[chunk[HUC8_COL].astype(str).isin(huc8)]
+
+    if county and COUNTY_COL in chunk.columns:
+        chunk = chunk[chunk[COUNTY_COL].astype(str).isin(county)]
+
+    if parameter and param_col and param_col in chunk.columns:
+        chunk = chunk[chunk[param_col].astype(str).isin(parameter)]
+
+    return chunk
+
+# ==============================
 # FastAPI app
 # ==============================
 app = FastAPI(title="Water Quality API")
 
 # ==============================
-# ✅ NEW ROOT ENDPOINT (فقط این اضافه شده)
+# Root endpoint
 # ==============================
 @app.get("/")
 def root():
-    return {
-        "status": "running",
-        "service": "Water Quality API"
-    }
+    return {"status": "running", "service": "Water Quality API"}
 
 # ==============================
 # Sanity check
@@ -87,7 +140,25 @@ def huc8_list():
         "huc8_values": [r[0] for r in rows if r and r[0] is not None],
     }
 
-# (بقیه کد دقیقاً همان قبلی است — هیچ تغییری داده نشده)
+# ==============================
+# /county-list
+# ==============================
+@app.get("/county-list")
+def county_list():
+    with get_db_connection() as con:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT {COUNTY_COL}
+            FROM wq
+            WHERE {COUNTY_COL} IS NOT NULL
+            ORDER BY {COUNTY_COL}
+            """
+        ).fetchall()
+
+    return {
+        "county_column": COUNTY_COL,
+        "county_values": [r[0] for r in rows if r and r[0] is not None],
+    }
 
 # ==============================
 # /stations
@@ -225,100 +296,3 @@ def station_data(
         "data": df.replace({pd.NA: None}).to_dict(orient="records"),
         "parameter_column": param_col,
     }
-
-# ==============================
-# /mean-per-station (CSV-based)
-# ==============================
-@app.get("/mean-per-station")
-def mean_per_station(
-    parameter: Optional[List[str]] = Query(default=None),
-    huc8: Optional[List[str]] = Query(default=None),
-    county: Optional[List[str]] = Query(default=None),
-):
-    cols = get_columns()
-    param_col = get_param_col()
-
-    if STATION_COL not in cols or VALUE_COL not in cols:
-        raise HTTPException(status_code=400, detail="Missing required columns")
-
-    needed = [STATION_COL, VALUE_COL]
-    if HUC8_COL in cols:
-        needed.append(HUC8_COL)
-    if COUNTY_COL in cols:
-        needed.append(COUNTY_COL)
-    if param_col:
-        needed.append(param_col)
-
-    sums: Dict[str, Tuple[float, int]] = {}
-
-    for chunk in _read_chunks(usecols=needed):
-        chunk = _apply_filters(chunk, parameter, huc8, county)
-        vals = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
-        chunk = chunk.assign(_v=vals).dropna(subset=[STATION_COL, "_v"])
-
-        for sid, g in chunk.groupby(STATION_COL)["_v"]:
-            s, c = g.sum(), g.count()
-            ps, pc = sums.get(sid, (0.0, 0))
-            sums[sid] = (ps + s, pc + c)
-
-    return [
-        {"MonitoringLocationIdentifierCor": sid, "mean_value": s / c}
-        for sid, (s, c) in sums.items()
-        if c > 0
-    ]
-
-# ==============================
-# /download-range  ✅ NEW
-# ==============================
-@app.get("/download-range")
-def download_range(
-    start_year: int,
-    end_year: int,
-    parameter: Optional[List[str]] = Query(default=None),
-    huc8: Optional[List[str]] = Query(default=None),
-    county: Optional[List[str]] = Query(default=None),
-):
-    param_col = get_param_col()
-
-    start_date = f"{start_year}-01-01"
-    end_date = f"{end_year}-12-31"
-
-    where = [
-        f"{DATE_COL} IS NOT NULL",
-        f"{DATE_COL} >= ?",
-        f"{DATE_COL} <= ?",
-    ]
-    params: List = [start_date, end_date]
-
-    if parameter and param_col:
-        where.append(f"{param_col} IN ({','.join(['?'] * len(parameter))})")
-        params.extend(parameter)
-
-    if huc8:
-        where.append(f"{HUC8_COL} IN ({','.join(['?'] * len(huc8))})")
-        params.extend(huc8)
-
-    if county:
-        where.append(f"{COUNTY_COL} IN ({','.join(['?'] * len(county))})")
-        params.extend(county)
-
-    sql = f"""
-        SELECT *
-        FROM wq
-        WHERE {' AND '.join(where)}
-        ORDER BY {DATE_COL}
-    """
-
-    with get_db_connection() as con:
-        df = con.execute(sql, params).df()
-
-    buf = io.StringIO()
-    if not df.empty:
-        df.to_csv(buf, index=False)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=subset.csv"},
-    )
