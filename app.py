@@ -95,6 +95,7 @@ def _apply_filters(chunk, parameter=None, huc8=None, county=None):
 app = FastAPI(title="Water Quality API")
 
 @app.get("/")
+@app.head("/")
 def root():
     return {"status": "running", "message": "Water Quality API is live"}
 # ==============================
